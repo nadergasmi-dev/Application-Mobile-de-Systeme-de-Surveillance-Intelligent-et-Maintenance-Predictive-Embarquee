@@ -287,7 +287,7 @@ export default function MonitoringDashboard() {
           </div>
         </div>
 
-        {/* ✅ Alert Thresholds Info */}
+        {/* ✅ Alert Thresholds Info */}//
         <div className="bg-[#1a1a1a] rounded-xl p-4 borde
         r border-gray-800">
           <p className="text-gray-400 text-xs font-medium mb-2">ALERT THRESHOLDS</p>
