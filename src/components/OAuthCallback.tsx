@@ -2,6 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createClient } from '../utils/supabase/client';
 import motorLogo from '../imports/MOTOR_(2)-1.png';
+import { Capacitor } from '@capacitor/core';
+import { Browser } from '@capacitor/browser';
+import { App } from '@capacitor/app';
 
 export default function OAuthCallback() {
   const navigate = useNavigate();
@@ -12,41 +15,84 @@ export default function OAuthCallback() {
     const handleOAuthCallback = async () => {
       try {
         const supabase = createClient();
-        
-        // Get the hash params from URL
-        const hashParams = new URLSearchParams(window.location.hash.substring(1));
-        const accessToken = hashParams.get('access_token');
-        const refreshToken = hashParams.get('refresh_token');
-        
-        if (accessToken) {
-          // Set session with the tokens from URL
-          const { data, error: sessionError } = await supabase.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken || '',
+
+        if (Capacitor.isNativePlatform()) {
+          // ✅ MOBILE — Écoute le deep link de retour
+          App.addListener('appUrlOpen', async ({ url }) => {
+            console.log('App opened with URL:', url);
+
+            // Fermer le Custom Tab
+            await Browser.close();
+
+            // Extraire les tokens du deep link
+            const urlObj = new URL(url);
+            const accessToken = urlObj.searchParams.get('access_token') 
+              || new URLSearchParams(urlObj.hash.substring(1)).get('access_token');
+            const refreshToken = urlObj.searchParams.get('refresh_token')
+              || new URLSearchParams(urlObj.hash.substring(1)).get('refresh_token');
+
+            if (accessToken) {
+              const { data, error: sessionError } = await supabase.auth.setSession({
+                access_token: accessToken,
+                refresh_token: refreshToken || '',
+              });
+
+              if (sessionError) {
+                setError(sessionError.message);
+                setIsProcessing(false);
+                return;
+              }
+
+              if (data.session) {
+                navigate('/machine-setup', { replace: true });
+              }
+            } else {
+              // Vérifier si déjà connecté
+              const { data: { session } } = await supabase.auth.getSession();
+              if (session) {
+                navigate('/machine-setup', { replace: true });
+              } else {
+                navigate('/login', { replace: true });
+              }
+            }
           });
 
-          if (sessionError) {
-            console.error('Session error:', sessionError);
-            setError(sessionError.message);
-            setIsProcessing(false);
-            return;
+          // Vérifier si déjà connecté (cas où l'app revient en foreground)
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session) {
+            await Browser.close();
+            navigate('/machine-setup', { replace: true });
           }
 
-          if (data.session) {
-            // Clear the hash from URL
-            window.history.replaceState({}, document.title, window.location.pathname);
-            
-            // Navigate to machine setup
-            navigate('/machine-setup', { replace: true });
-          }
         } else {
-          // No token in URL, check if already authenticated
-          const { data: { session } } = await supabase.auth.getSession();
-          
-          if (session) {
-            navigate('/machine-setup', { replace: true });
+          // ✅ WEB — comportement normal
+          const hashParams = new URLSearchParams(window.location.hash.substring(1));
+          const accessToken = hashParams.get('access_token');
+          const refreshToken = hashParams.get('refresh_token');
+
+          if (accessToken) {
+            const { data, error: sessionError } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken || '',
+            });
+
+            if (sessionError) {
+              setError(sessionError.message);
+              setIsProcessing(false);
+              return;
+            }
+
+            if (data.session) {
+              window.history.replaceState({}, document.title, window.location.pathname);
+              navigate('/machine-setup', { replace: true });
+            }
           } else {
-            navigate('/login', { replace: true });
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session) {
+              navigate('/machine-setup', { replace: true });
+            } else {
+              navigate('/login', { replace: true });
+            }
           }
         }
       } catch (err) {
@@ -57,6 +103,11 @@ export default function OAuthCallback() {
     };
 
     handleOAuthCallback();
+
+    // Cleanup listener
+    return () => {
+      App.removeAllListeners();
+    };
   }, [navigate]);
 
   if (error) {

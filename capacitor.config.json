@@ -1,0 +1,15 @@
+{
+  "appId": "com.motorwatch.app",
+  "appName": "MotorWatch",
+  "webDir": "build",
+  "plugins": {
+    "GoogleAuth": {
+      "scopes": ["profile", "email"],
+      "serverClientId": "173701383558-sc56fka78151u0ap9gubjgdiesa4m18d.apps.googleusercontent.com",
+      "forceCodeForRefreshToken": true
+    }
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

@@ -1,7 +1,13 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Settings, Clock, ArrowRight } from 'lucide-react';
+import { Settings, Clock, ArrowRight, Gauge } from 'lucide-react';
 import motorLogo from '../imports/MOTOR_(2).png';
+
+const OPERATING_MODES = [
+  { id: 'idle', name: 'Idle', description: 'Low load, standby operation' },
+  { id: 'normal', name: 'Normal', description: 'Standard operating conditions' },
+  { id: 'peak', name: 'Peak', description: 'Maximum load, high-demand operation' },
+];
 
 const MACHINE_TYPES = [
   { id: 'pump', name: 'Pump', description: 'Centrifugal & Positive Displacement' },
@@ -13,13 +19,15 @@ const MACHINE_TYPES = [
 export default function MachineSetupScreen() {
   const navigate = useNavigate();
   const [selectedMachine, setSelectedMachine] = useState('');
+  const [operatingMode, setOperatingMode] = useState('');
   const [hoursSinceMaintenance, setHoursSinceMaintenance] = useState('');
   const [error, setError] = useState('');
 
   const handleSubmit = () => {
-    if (selectedMachine && hoursSinceMaintenance) {
+    if (selectedMachine && operatingMode && hoursSinceMaintenance) {
       const config = {
         machineType: selectedMachine,
+        operatingMode,
         hoursSinceMaintenance: parseInt(hoursSinceMaintenance)
       };
       localStorage.setItem('machineConfig', JSON.stringify(config));
@@ -73,6 +81,30 @@ export default function MachineSetupScreen() {
             </div>
           </div>
 
+          {/* Operating Mode */}
+          <div>
+            <label className="flex items-center space-x-2 text-sm font-medium text-gray-300 mb-3">
+              <Gauge className="w-5 h-5 text-[#FFB84E]" />
+              <span>Operating Mode</span>
+            </label>
+            <div className="grid grid-cols-3 gap-3">
+              {OPERATING_MODES.map((mode) => (
+                <button
+                  key={mode.id}
+                  onClick={() => setOperatingMode(mode.id)}
+                  className={`p-4 rounded-xl border-2 transition-all text-left ${
+                    operatingMode === mode.id
+                      ? 'border-[#FFB84E] bg-[#FFB84E]/10'
+                      : 'border-gray-700 bg-[#1a1a1a] hover:border-gray-600'
+                  }`}
+                >
+                  <p className="text-white font-medium">{mode.name}</p>
+                  <p className="text-gray-500 text-xs mt-1">{mode.description}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Hours Since Maintenance */}
           <div>
             <label className="flex items-center space-x-2 text-sm font-medium text-gray-300 mb-3">
@@ -99,7 +131,7 @@ export default function MachineSetupScreen() {
           {/* Continue Button */}
           <button
             onClick={handleSubmit}
-            disabled={!selectedMachine || !hoursSinceMaintenance}
+            disabled={!selectedMachine || !operatingMode || !hoursSinceMaintenance}
             className="w-full bg-[#FFB84E] text-[#262525] font-bold py-4 rounded-lg hover:bg-[#ffa31a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-2 mt-8"
           >
             <span>Start Monitoring</span>

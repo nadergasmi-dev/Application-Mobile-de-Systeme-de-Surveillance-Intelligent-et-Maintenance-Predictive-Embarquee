@@ -12,27 +12,26 @@ interface ChatbotProps {
   failureProbability?: number;
   healthStatus?: string;
   machineType?: string;
+  operatingMode?: string;
 }
 
-const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
-console.log('KEY:', import.meta.env.VITE_GROQ_API_KEY);
-const SYSTEM_PROMPT = `You are MotorWatch AI Assistant, an expert in industrial motor maintenance and predictive maintenance systems. 
-You help technicians understand sensor data, alerts, and maintenance recommendations.
-Be concise, technical, and helpful. Answer in the same language the user writes in (French or English).
-When given sensor data, analyze it and provide actionable insights.`;
+// ✅ Gemini 2.5 Flash API Key (gratuit sur Google AI Studio)
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
-export default function Chatbot({ 
-  currentTemp = 0, 
-  currentVibration = 0, 
+export default function Chatbot({
+  currentTemp = 0,
+  currentVibration = 0,
   failureProbability = 0,
   healthStatus = 'NORMAL',
-  machineType = 'Unknown'
+  machineType = 'Unknown',
+  operatingMode = 'Unknown'
 }: ChatbotProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       role: 'assistant',
-      content: `Hello! I'm MotorWatch AI 🤖\n\nI can help you analyze your machine data and answer maintenance questions. How can I help you today?`
+      content: `Bonjour ! Je suis MotorWatch AI 🤖\n\nJe peux vous aider avec :\n- L'analyse des données capteurs\n- Les recommandations de maintenance\n- Toute question sur votre machine\n\nComment puis-je vous aider ?`
     }
   ]);
   const [input, setInput] = useState('');
@@ -45,6 +44,28 @@ export default function Chatbot({
     }
   }, [messages, isOpen]);
 
+  const getSystemPrompt = () => {
+    return `Tu es MotorWatch AI — expert en maintenance industrielle, mécanique, électrotechnique et surveillance de machines.
+
+DONNÉES TEMPS RÉEL DE LA MACHINE :
+- Type : ${machineType}
+- Mode opératoire : ${operatingMode}
+- Température actuelle : ${currentTemp}°C
+- Vibration RMS : ${currentVibration} mm/s
+- Probabilité de panne : ${failureProbability}%
+- État de santé : ${healthStatus}
+
+RÈGLES ABSOLUES :
+1. Réponds à CHAQUE question posée — tu ne refuses JAMAIS de répondre.
+2. Sois précis et technique : donne des chiffres, des seuils, des causes probables, des actions concrètes.
+3. Si la question porte sur les données capteurs, utilise les valeurs ci-dessus et commente-les explicitement.
+4. Si la question porte sur la maintenance, donne un plan d'action numéroté avec priorités.
+5. Si la question est générale (mécanique, électrique, thermique, vibratoire), réponds avec expertise complète.
+6. Réponds dans la langue de l'utilisateur (français ou anglais) sans exception.
+7. Ne dis jamais "je ne peux pas" ou "je ne suis pas en mesure" — trouve toujours une réponse utile.
+8. Structure tes réponses : contexte → analyse → recommandations → seuils de référence si pertinent.`;
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
 
@@ -52,47 +73,52 @@ export default function Chatbot({
     setInput('');
     setLoading(true);
 
-    // Add context about current sensor data to the message
-    const contextualMessage = `[Current machine data: Machine=${machineType}, Temp=${currentTemp}°C, Vibration=${currentVibration}mm/s, Failure Probability=${failureProbability}%, Status=${healthStatus}]\n\nUser question: ${userMessage}`;
-
     const newMessages: Message[] = [...messages, { role: 'user', content: userMessage }];
     setMessages(newMessages);
 
     try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      // ✅ Format Gemini API : conversation history + system instruction
+      const contents = newMessages.map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }]
+      }));
+
+      const response = await fetch(GEMINI_API_URL, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${GROQ_API_KEY}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            ...newMessages.slice(0, -1).map(m => ({
-              role: m.role,
-              content: m.content
-            })),
-            { role: 'user', content: contextualMessage }
-          ],
-          max_tokens: 500,
-          temperature: 0.7,
+          system_instruction: {
+            parts: [{ text: getSystemPrompt() }]
+          },
+          contents,
+          generationConfig: {
+            maxOutputTokens: 2048,
+            temperature: 0.3,
+          },
         }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error?.message || 'API error');
+        throw new Error(data.error?.message || 'Erreur API Gemini');
       }
 
-      const reply = data.choices[0].message.content;
+      // ✅ Extraction de la réponse Gemini
+      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!reply) {
+        throw new Error('Réponse vide de Gemini');
+      }
+
       setMessages([...newMessages, { role: 'assistant', content: reply }]);
-    } catch (err) {
-      console.error('Groq API error:', err);
+    } catch (err: any) {
+      console.error('Gemini API error:', err);
       setMessages([...newMessages, {
         role: 'assistant',
-        content: '⚠️ Error connecting to AI. Please check your GROQ API key in environment variables.'
+        content: `⚠️ Erreur de connexion à l'IA. Vérifiez votre clé VITE_GEMINI_API_KEY.\n\nDétail : ${err?.message || 'Erreur inconnue'}`
       }]);
     } finally {
       setLoading(false);
@@ -107,14 +133,14 @@ export default function Chatbot({
   };
 
   const quickQuestions = [
-    "Why is temperature high?",
-    "What does vibration indicate?",
-    "When to do maintenance?",
+    "Prochaines étapes de maintenance ?",
+    "Analyser les données actuelles",
+    "Ma machine est-elle en bonne santé ?",
   ];
 
   return (
     <>
-      {/* Floating Button */}
+      {/* Bouton flottant */}
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
@@ -124,11 +150,11 @@ export default function Chatbot({
         </button>
       )}
 
-      {/* Chat Window */}
+      {/* Fenêtre de chat */}
       {isOpen && (
         <div className="fixed bottom-6 right-6 w-80 h-[500px] bg-[#1a1a1a] rounded-2xl border border-gray-700 flex flex-col shadow-2xl z-50 overflow-hidden">
-          
-          {/* Header */}
+
+          {/* En-tête */}
           <div className="bg-[#0f0f0f] px-4 py-3 flex items-center justify-between border-b border-gray-700">
             <div className="flex items-center space-x-2">
               <div className="w-8 h-8 bg-[#FFB84E] rounded-full flex items-center justify-center">
@@ -138,7 +164,7 @@ export default function Chatbot({
                 <p className="text-white text-sm font-semibold">MotorWatch AI</p>
                 <div className="flex items-center space-x-1">
                   <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
-                  <p className="text-green-400 text-xs">Online</p>
+                  <p className="text-green-400 text-xs">En ligne</p>
                 </div>
               </div>
             </div>
@@ -157,17 +183,14 @@ export default function Chatbot({
                 key={index}
                 className={`flex items-start space-x-2 ${msg.role === 'user' ? 'flex-row-reverse space-x-reverse' : ''}`}
               >
-                {/* Avatar */}
                 <div className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-1 ${
                   msg.role === 'assistant' ? 'bg-[#FFB84E]' : 'bg-gray-600'
                 }`}>
-                  {msg.role === 'assistant' 
+                  {msg.role === 'assistant'
                     ? <Bot className="w-3 h-3 text-[#262525]" />
                     : <User className="w-3 h-3 text-white" />
                   }
                 </div>
-
-                {/* Bubble */}
                 <div className={`max-w-[85%] px-3 py-2 rounded-xl text-sm leading-relaxed whitespace-pre-wrap ${
                   msg.role === 'assistant'
                     ? 'bg-[#262525] text-gray-200 border border-gray-700'
@@ -178,7 +201,7 @@ export default function Chatbot({
               </div>
             ))}
 
-            {/* Loading indicator */}
+            {/* Indicateur de chargement */}
             {loading && (
               <div className="flex items-start space-x-2">
                 <div className="w-6 h-6 rounded-full bg-[#FFB84E] flex items-center justify-center flex-shrink-0 mt-1">
@@ -189,17 +212,16 @@ export default function Chatbot({
                 </div>
               </div>
             )}
-
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Quick Questions */}
+          {/* Questions rapides */}
           {messages.length <= 1 && (
             <div className="px-3 pb-2 flex flex-wrap gap-1">
               {quickQuestions.map((q, i) => (
                 <button
                   key={i}
-                  onClick={() => { setInput(q); }}
+                  onClick={() => setInput(q)}
                   className="text-xs bg-[#262525] text-[#FFB84E] border border-[#FFB84E]/30 px-2 py-1 rounded-full hover:bg-[#FFB84E]/10 transition-colors"
                 >
                   {q}
@@ -208,7 +230,7 @@ export default function Chatbot({
             </div>
           )}
 
-          {/* Input */}
+          {/* Zone de saisie */}
           <div className="p-3 border-t border-gray-700">
             <div className="flex items-center space-x-2 bg-[#262525] border border-gray-600 rounded-xl px-3 py-2 focus-within:border-[#FFB84E] transition-colors">
               <input
@@ -216,7 +238,7 @@ export default function Chatbot({
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask about your machine..."
+                placeholder="Posez votre question..."
                 className="flex-1 bg-transparent text-white text-sm placeholder-gray-500 outline-none"
                 disabled={loading}
               />
@@ -228,7 +250,7 @@ export default function Chatbot({
                 <Send className="w-3 h-3 text-[#262525]" />
               </button>
             </div>
-            <p className="text-gray-600 text-xs text-center mt-1">Powered by Groq • Llama 3.3</p>
+            <p className="text-gray-600 text-xs text-center mt-1">Propulsé par Gemini 2.5 Flash</p>
           </div>
         </div>
       )}

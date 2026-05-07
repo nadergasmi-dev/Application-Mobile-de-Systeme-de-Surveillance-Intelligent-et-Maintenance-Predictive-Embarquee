@@ -4,6 +4,7 @@ import {
   Routes,
   Route,
   Navigate,
+  useNavigate,
 } from "react-router-dom";
 import StartScreen from "./components/StartScreen";
 import LoginScreen from "./components/LoginScreen";
@@ -18,12 +19,78 @@ import Settings from "./components/Settings";
 import OAuthCallback from "./components/OAuthCallback";
 import { createClient } from "./utils/supabase/client";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { Capacitor } from "@capacitor/core";
+import { App as CapApp } from "@capacitor/app";
+import { Browser } from "@capacitor/browser";
+
+// ✅ Doit être DANS le Router pour accéder à useNavigate
+function DeepLinkHandler() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    const handleAppUrlOpen = async ({ url }: { url: string }) => {
+      console.log("Deep link received:", url);
+
+      // Fermer le browser immédiatement
+      try { await Browser.close(); } catch (e) {}
+
+      const supabase = createClient();
+
+      try {
+        // Extraire les tokens du deep link
+        const urlObj = new URL(url);
+        const hashParams = new URLSearchParams(urlObj.hash.substring(1));
+        const searchParams = urlObj.searchParams;
+
+        const accessToken =
+          hashParams.get("access_token") ||
+          searchParams.get("access_token");
+        const refreshToken =
+          hashParams.get("refresh_token") ||
+          searchParams.get("refresh_token");
+
+        if (accessToken) {
+          const { data, error } = await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken || "",
+          });
+
+          if (!error && data.session) {
+            navigate("/machine-setup", { replace: true });
+            return;
+          }
+        }
+
+        // Pas de token → vérifier session existante
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session) {
+          navigate("/machine-setup", { replace: true });
+        } else {
+          navigate("/login", { replace: true });
+        }
+
+      } catch (err) {
+        console.error("Deep link error:", err);
+        navigate("/login", { replace: true });
+      }
+    };
+
+    CapApp.addListener("appUrlOpen", handleAppUrlOpen);
+
+    return () => {
+      CapApp.removeAllListeners();
+    };
+  }, [navigate]);
+
+  return null;
+}
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Set document title
   useEffect(() => {
     document.title = "MotorWatch - Industrial Motor Monitoring";
   }, []);
@@ -31,18 +98,18 @@ function App() {
   useEffect(() => {
     const supabase = createClient();
 
-    // Check active session on mount
+    // Vérifier session existante
     supabase.auth.getSession().then(({ data: { session } }) => {
       setIsAuthenticated(!!session);
       setLoading(false);
     });
 
-    // Listen for auth changes
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setIsAuthenticated(!!session);
-    });
+    // ✅ Écouter les changements d'auth (Google login inclus)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setIsAuthenticated(!!session);
+      }
+    );
 
     return () => subscription.unsubscribe();
   }, []);
@@ -65,15 +132,15 @@ function App() {
   return (
     <ThemeProvider>
       <Router>
+        {/* ✅ Deep link handler pour Google OAuth sur mobile */}
+        <DeepLinkHandler />
         <div className="min-h-screen bg-[#262525]">
           <Routes>
             <Route path="/" element={<StartScreen />} />
             <Route
               path="/login"
               element={
-                <LoginScreen
-                  onLogin={() => setIsAuthenticated(true)}
-                />
+                <LoginScreen onLogin={() => setIsAuthenticated(true)} />
               }
             />
             <Route path="/signup" element={<SignUpScreen />} />
