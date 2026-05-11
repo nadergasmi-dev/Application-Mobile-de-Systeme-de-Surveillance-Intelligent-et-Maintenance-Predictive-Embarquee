@@ -147,7 +147,7 @@ export default function MonitoringDashboard() {
     if (chartView === 'minute') {
       // Last 60 minutes — average per minute
       const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const filtered = rawSensors.filter(r => r.created_at >= cutoff);
+      const filtered = rawSensors.filter(r => new Date(r.created_at).getTime() >= cutoffMs);
       // Bucket key = "HH:MM"
       const getBucket = (iso: string) => {
         const d = new Date(iso);
@@ -158,7 +158,7 @@ export default function MonitoringDashboard() {
 
     // hour — last 24 hours — average per hour
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const filtered = rawSensors.filter(r => r.created_at >= cutoff);
+    const filtered = rawSensors.filter(r => new Date(r.created_at).getTime() >= cutoffMs);
     const getBucket = (iso: string) => {
       const d = new Date(iso);
       return `${String(d.getHours()).padStart(2,'0')}:00`;
