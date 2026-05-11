@@ -1,202 +1,262 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, AlertTriangle, Thermometer, Waves, Filter } from 'lucide-react';
-
-type EventType = 'all' | 'temperature' | 'vibration';
-type AlertLevel = 'WARN' | 'ALARM';
+import {
+  AlertTriangle, ArrowLeft, AlertCircle, XCircle,
+  CheckCircle, RefreshCw, Thermometer, Waves, Activity
+} from 'lucide-react';
+import { createClient } from '../utils/supabase/client';
 
 interface Event {
-  id: string;
-  type: 'temperature' | 'vibration';
-  level: AlertLevel;
-  value: number;
-  timestamp: Date;
+  id: number;
+  created_at: string;
+  source: string;
+  level: string;
   message: string;
+  value: number;
+  threshold: number;
 }
+
+// ─── Level badge style ────────────────────────────────────
+const getLevelStyle = (level: string) => {
+  switch (level?.toLowerCase()) {
+    case 'critical': case 'fault': case 'error':
+      return {
+        bg:    'bg-red-500/10 border-red-500/30',
+        text:  'text-red-400',
+        icon:  <XCircle className="w-5 h-5 text-red-400" />,
+        badge: 'bg-red-500/20 text-red-300',
+        label: 'Critical',
+      };
+    case 'warning': case 'warn':
+      return {
+        bg:    'bg-orange-500/10 border-orange-500/30',
+        text:  'text-[#FFB84E]',
+        icon:  <AlertCircle className="w-5 h-5 text-[#FFB84E]" />,
+        badge: 'bg-[#FFB84E]/20 text-[#FFB84E]',
+        label: 'Warning',
+      };
+    default:
+      return {
+        bg:    'bg-green-500/10 border-green-500/30',
+        text:  'text-green-400',
+        icon:  <CheckCircle className="w-5 h-5 text-green-400" />,
+        badge: 'bg-green-500/20 text-green-300',
+        label: 'Info',
+      };
+  }
+};
+
+// ─── Source icon ──────────────────────────────────────────
+const getSourceIcon = (source: string) => {
+  switch (source?.toLowerCase()) {
+    case 'temperature':
+      return <Thermometer className="w-4 h-4 text-orange-400" />;
+    case 'vibration':
+      return <Waves className="w-4 h-4 text-blue-400" />;
+    default:
+      return <Activity className="w-4 h-4 text-gray-400" />;
+  }
+};
+
+// ─── Source label (capitalize) ────────────────────────────
+const formatSource = (source: string) =>
+  source.charAt(0).toUpperCase() + source.slice(1).toLowerCase();
 
 export default function Events() {
   const navigate = useNavigate();
-  const [filter, setFilter] = useState<EventType>('all');
+  const supabase = createClient();
 
-  // Mock events data
-  const allEvents: Event[] = [
-    {
-      id: '1',
-      type: 'temperature',
-      level: 'ALARM',
-      value: 87.2,
-      timestamp: new Date(Date.now() - 1000 * 60 * 15),
-      message: 'Critical temperature threshold exceeded'
-    },
-    {
-      id: '2',
-      type: 'vibration',
-      level: 'WARN',
-      value: 3.8,
-      timestamp: new Date(Date.now() - 1000 * 60 * 45),
-      message: 'Elevated vibration detected'
-    },
-    {
-      id: '3',
-      type: 'temperature',
-      level: 'WARN',
-      value: 76.5,
-      timestamp: new Date(Date.now() - 1000 * 60 * 120),
-      message: 'Temperature above warning threshold'
-    },
-    {
-      id: '4',
-      type: 'vibration',
-      level: 'ALARM',
-      value: 4.7,
-      timestamp: new Date(Date.now() - 1000 * 60 * 180),
-      message: 'Critical vibration level detected'
-    },
-    {
-      id: '5',
-      type: 'temperature',
-      level: 'WARN',
-      value: 77.1,
-      timestamp: new Date(Date.now() - 1000 * 60 * 240),
-      message: 'Temperature warning'
-    },
-    {
-      id: '6',
-      type: 'vibration',
-      level: 'WARN',
-      value: 3.6,
-      timestamp: new Date(Date.now() - 1000 * 60 * 300),
-      message: 'Vibration warning'
+  const [events, setEvents]     = useState<Event[]>([]);
+  const [sources, setSources]   = useState<string[]>([]);   // distinct sources from DB
+  const [filter, setFilter]     = useState<string>('all');  // 'all' or a source string
+  const [loading, setLoading]   = useState(true);
+
+  // ─── Fetch events + distinct sources ─────────────────
+  const fetchEvents = async () => {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('events')
+        .select('id, created_at, source, level, message, value, threshold')
+        .order('created_at', { ascending: false })
+        .limit(200);
+
+      if (!error && data) {
+        const rows = data as Event[];
+        setEvents(rows);
+
+        // Extract distinct sources dynamically
+        const distinctSources = Array.from(
+          new Set(rows.map(e => e.source?.toLowerCase()).filter(Boolean))
+        ).sort();
+        setSources(distinctSources);
+      }
+    } catch (err) {
+      console.error('Events fetch error:', err);
+    } finally {
+      setLoading(false);
     }
-  ];
+  };
 
-  const filteredEvents = allEvents.filter(event => {
-    if (filter === 'all') return true;
-    return event.type === filter;
-  });
+  useEffect(() => { fetchEvents(); }, []);
 
-  const formatTimestamp = (date: Date) => {
-    const now = new Date();
-    const diffMinutes = Math.floor((now.getTime() - date.getTime()) / (1000 * 60));
+  // ─── Filter logic ─────────────────────────────────────
+  // 'all' → show everything
+  // 'temperature' / 'vibration' / other → match source
+  const filteredEvents = filter === 'all'
+    ? events
+    : events.filter(e => e.source?.toLowerCase() === filter);
 
-    if (diffMinutes < 60) {
-      return `${diffMinutes} min ago`;
-    } else if (diffMinutes < 1440) {
-      return `${Math.floor(diffMinutes / 60)} hours ago`;
-    } else {
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    }
+  // ─── Count per source (for badges on filter buttons) ──
+  const countFor = (src: string) =>
+    src === 'all'
+      ? events.length
+      : events.filter(e => e.source?.toLowerCase() === src).length;
+
+  // ─── Date formatter ───────────────────────────────────
+  const formatDate = (iso: string) => {
+    const d = new Date(iso);
+    return (
+      d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) +
+      ' ' +
+      d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+    );
   };
 
   return (
     <div className="min-h-screen bg-[#262525]">
       {/* Header */}
-      <div className="bg-[#1a1a1a] px-6 py-4 border-b border-gray-800">
-        <div className="flex items-center space-x-4">
+      <div className="bg-[#1a1a1a] border-b border-gray-800">
+        <div className="px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => navigate('/monitoring')}
+              className="p-2 text-gray-400 hover:text-white transition-colors"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div>
+              <h1 className="text-white font-bold text-lg flex items-center space-x-2">
+                <AlertTriangle className="w-5 h-5 text-[#FFB84E]" />
+                <span>EVENTS & ALERTS</span>
+              </h1>
+              <p className="text-gray-400 text-xs">
+                {filteredEvents.length} event(s)
+                {filter !== 'all' && ` — ${formatSource(filter)}`}
+              </p>
+            </div>
+          </div>
           <button
-            onClick={() => navigate('/dashboard')}
-            className="text-gray-400 hover:text-white transition-colors"
+            onClick={fetchEvents}
+            className="p-2 text-gray-400 hover:text-[#FFB84E] transition-colors"
+            title="Refresh"
           >
-            <ArrowLeft className="w-6 h-6" />
+            <RefreshCw className="w-5 h-5" />
           </button>
-          <h1 className="text-white font-bold text-lg">Events & Alerts</h1>
         </div>
       </div>
 
-      <div className="px-6 py-6 space-y-6">
-        {/* Filter Buttons */}
-        <div className="bg-[#1a1a1a] rounded-xl p-2 border border-gray-800 flex space-x-2">
-          <button
-            onClick={() => setFilter('all')}
-            className={`flex-1 py-2.5 rounded-lg font-medium text-sm transition-colors ${
-              filter === 'all'
-                ? 'bg-[#FFB84E] text-[#262525]'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            All
-          </button>
-          <button
-            onClick={() => setFilter('temperature')}
-            className={`flex-1 py-2.5 rounded-lg font-medium text-sm transition-colors flex items-center justify-center space-x-2 ${
-              filter === 'temperature'
-                ? 'bg-[#FFB84E] text-[#262525]'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            <Thermometer className="w-4 h-4" />
-            <span>Temp</span>
-          </button>
-          <button
-            onClick={() => setFilter('vibration')}
-            className={`flex-1 py-2.5 rounded-lg font-medium text-sm transition-colors flex items-center justify-center space-x-2 ${
-              filter === 'vibration'
-                ? 'bg-[#FFB84E] text-[#262525]'
-                : 'text-gray-400 hover:text-white'
-            }`}
-          >
-            <Waves className="w-4 h-4" />
-            <span>Vibration</span>
-          </button>
-        </div>
+      {/* ─── Filter buttons by SOURCE ─────────────────── */}
+      <div className="px-6 pt-4 pb-2 flex flex-wrap gap-2">
+        {/* "All" button */}
+        <button
+          onClick={() => setFilter('all')}
+          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all flex items-center space-x-1 ${
+            filter === 'all'
+              ? 'bg-[#FFB84E] text-[#262525]'
+              : 'bg-[#1a1a1a] text-gray-400 border border-gray-700 hover:border-[#FFB84E]/50'
+          }`}
+        >
+          <span>All</span>
+          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+            filter === 'all' ? 'bg-[#262525]/30' : 'bg-gray-700'
+          }`}>
+            {countFor('all')}
+          </span>
+        </button>
 
-        {/* Events List */}
-        <div className="space-y-3">
-          {filteredEvents.map((event) => (
-            <div
-              key={event.id}
-              className={`bg-[#1a1a1a] rounded-xl p-4 border ${
-                event.level === 'ALARM' ? 'border-red-500/50' : 'border-[#FFB84E]/50'
-              }`}
-            >
-              <div className="flex items-start space-x-4">
-                <div className={`p-2 rounded-lg ${
-                  event.level === 'ALARM' ? 'bg-red-500/20' : 'bg-[#FFB84E]/20'
-                }`}>
-                  {event.type === 'temperature' ? (
-                    <Thermometer className={`w-5 h-5 ${
-                      event.level === 'ALARM' ? 'text-red-500' : 'text-[#FFB84E]'
-                    }`} />
-                  ) : (
-                    <Waves className={`w-5 h-5 ${
-                      event.level === 'ALARM' ? 'text-red-500' : 'text-[#FFB84E]'
-                    }`} />
-                  )}
+        {/* One button per distinct source */}
+        {sources.map(src => (
+          <button
+            key={src}
+            onClick={() => setFilter(src)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all flex items-center space-x-1 ${
+              filter === src
+                ? 'bg-[#FFB84E] text-[#262525]'
+                : 'bg-[#1a1a1a] text-gray-400 border border-gray-700 hover:border-[#FFB84E]/50'
+            }`}
+          >
+            {getSourceIcon(src)}
+            <span>{formatSource(src)}</span>
+            <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+              filter === src ? 'bg-[#262525]/30' : 'bg-gray-700'
+            }`}>
+              {countFor(src)}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* ─── Events list ─────────────────────────────── */}
+      <div className="px-6 py-3 space-y-3">
+        {loading ? (
+          <div className="flex items-center justify-center py-16">
+            <div className="inline-block animate-spin rounded-full h-10 w-10 border-4 border-[#FFB84E] border-t-transparent" />
+          </div>
+        ) : filteredEvents.length === 0 ? (
+          <div className="text-center py-16">
+            <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4 opacity-50" />
+            <p className="text-gray-400 text-lg font-medium">No events found</p>
+            <p className="text-gray-600 text-sm mt-1">
+              {filter === 'all'
+                ? 'All systems are operating normally'
+                : `No events for source "${formatSource(filter)}"`}
+            </p>
+          </div>
+        ) : (
+          filteredEvents.map(event => {
+            const style = getLevelStyle(event.level);
+            return (
+              <div key={event.id} className={`rounded-xl p-4 border ${style.bg}`}>
+                {/* Top row */}
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex items-center space-x-2">
+                    {style.icon}
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${style.badge}`}>
+                      {style.label}
+                    </span>
+                    {/* Source badge */}
+                    <span className="flex items-center space-x-1 text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded-full">
+                      {getSourceIcon(event.source)}
+                      <span>{formatSource(event.source)}</span>
+                    </span>
+                  </div>
+                  <span className="text-gray-500 text-xs whitespace-nowrap">
+                    {formatDate(event.created_at)}
+                  </span>
                 </div>
 
-                <div className="flex-1">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                      event.level === 'ALARM'
-                        ? 'bg-red-500/20 text-red-500'
-                        : 'bg-[#FFB84E]/20 text-[#FFB84E]'
-                    }`}>
-                      {event.level}
+                {/* Message */}
+                <p className={`text-sm font-medium ${style.text} mb-2`}>{event.message}</p>
+
+                {/* Value / Threshold */}
+                <div className="flex space-x-4">
+                  <span className="text-gray-500 text-xs">
+                    Value:{' '}
+                    <span className="text-white font-medium">
+                      {Number(event.value).toFixed(2)}
                     </span>
-                    <span className="text-gray-500 text-xs">
-                      {formatTimestamp(event.timestamp)}
+                  </span>
+                  <span className="text-gray-500 text-xs">
+                    Threshold:{' '}
+                    <span className="text-gray-300 font-medium">
+                      {Number(event.threshold).toFixed(2)}
                     </span>
-                  </div>
-                  <p className="text-white font-medium mb-1">{event.message}</p>
-                  <div className="flex items-center space-x-4 text-sm">
-                    <span className="text-gray-400">
-                      Value: <span className="text-white font-medium">
-                        {event.value}{event.type === 'temperature' ? '°C' : ''}
-                      </span>
-                    </span>
-                    <span className="text-gray-400 capitalize">{event.type}</span>
-                  </div>
+                  </span>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
-
-        {filteredEvents.length === 0 && (
-          <div className="text-center py-12">
-            <AlertTriangle className="w-12 h-12 text-gray-600 mx-auto mb-4" />
-            <p className="text-gray-400">No events found</p>
-          </div>
+            );
+          })
         )}
       </div>
     </div>

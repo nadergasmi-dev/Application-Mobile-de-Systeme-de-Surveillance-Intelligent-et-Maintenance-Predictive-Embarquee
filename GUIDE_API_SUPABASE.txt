@@ -1,0 +1,163 @@
+# MotorWatch — Guide d'intégration IoT / Modèles ML
+# Projet Supabase : gujvmxzekesjxqloffce
+# ============================================
+# Les clés sont disponibles dans :
+# Dashboard → Settings → API
+# ============================================
+
+
+## 📊 STRUCTURE DES TABLES CRÉÉES
+
+=== TABLE 1 : sensor_readings ===
+(Données brutes des capteurs — envoyées par l'ESP32)
+
+  - id            : BIGSERIAL (auto-incrémenté)
+  - created_at    : TIMESTAMPTZ (automatique = NOW())
+  - temperature   : FLOAT  ← °C — OBLIGATOIRE
+  - vibration     : FLOAT  ← mm/s RMS — OBLIGATOIRE
+  - machine_id    : TEXT   ← défaut = 'machine_01'
+
+
+=== TABLE 2 : ml_predictions ===
+(Résultats des 3 modèles IA — envoyés après inférence)
+
+  - id                      : BIGSERIAL (auto)
+  - created_at              : TIMESTAMPTZ (auto)
+  - sensor_reading_id       : BIGINT → référence sensor_readings.id (optionnel)
+  - machine_id              : TEXT (défaut = 'machine_01')
+
+  # Inputs contextuels (récupérés depuis l'app mobile via MachineSetup)
+  - machine_type            : TEXT → 'electric_motor' | 'compressor' | 'hydraulic_pump'
+  - hours_since_maintenance : FLOAT (heures depuis dernière maintenance)
+  - operating_mode          : TEXT → 'normal' | 'heavy' | 'idle'
+
+  # Modèle 1 — RUL (Remaining Useful Life)
+  - rul_hours               : FLOAT (durée de vie résiduelle en heures)
+
+  # Modèle 2 — Probabilité de panne
+  - failure_probability     : FLOAT (entre 0.0 et 1.0)
+
+  # Modèle 3 — Classification du type de défaillance
+  - failure_detected        : BOOLEAN (true si panne détectée)
+  - failure_type            : TEXT → 'bearing' | 'motor_overheat' | NULL
+  - bearing_probability     : FLOAT (0.0 à 1.0, confiance roulement)
+  - overheat_probability    : FLOAT (0.0 à 1.0, confiance surchauffe)
+
+
+=== TABLE 3 : events ===
+(Alertes et événements générés automatiquement)
+
+  - id          : BIGSERIAL (auto)
+  - created_at  : TIMESTAMPTZ (auto)
+  - machine_id  : TEXT
+  - event_type  : TEXT → 'temperature_alert' | 'vibration_alert' | 'failure_alert' | 'maintenance_due' | 'system_normal'
+  - severity    : TEXT → 'info' | 'warning' | 'critical'
+  - title       : TEXT (titre court affiché dans l'app)
+  - message     : TEXT (message détaillé)
+  - value       : FLOAT (valeur mesurée ayant déclenché l'événement)
+  - threshold   : FLOAT (seuil dépassé)
+  - resolved    : BOOLEAN (défaut = false)
+
+
+## 📡 VUES SQL DISPONIBLES
+
+  - sensor_chart_24h  → points moyennés par 5 min sur 24h (pour graphiques)
+  - latest_sensor     → dernière lecture capteur
+  - latest_prediction → dernière prédiction IA
+  - active_alerts     → événements non résolus
+
+
+## 🚀 EXEMPLE D'INSERTION (Python — avec service_role_key)
+
+import requests
+
+SUPABASE_URL = "https://gujvmxzekesjxqloffce.supabase.co"
+SERVICE_ROLE_KEY = "votre_service_role_key"  # Dashboard → Settings → API
+
+headers = {
+    "apikey": SERVICE_ROLE_KEY,
+    "Authorization": f"Bearer {SERVICE_ROLE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
+
+def send_data(temp, vib, rul, failure_prob, failure_detected,
+              failure_type, bearing_prob, overheat_prob,
+              machine_type, hours_maint, op_mode):
+
+    # 1. Insérer lecture capteur
+    r = requests.post(
+        f"{SUPABASE_URL}/rest/v1/sensor_readings",
+        json={"temperature": temp, "vibration": vib, "machine_id": "machine_01"},
+        headers=headers
+    )
+    sensor_id = r.json()[0]["id"]
+
+    # 2. Insérer prédictions des 3 modèles
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/ml_predictions",
+        json={
+            "sensor_reading_id": sensor_id,
+            "machine_id": "machine_01",
+            "machine_type": machine_type,
+            "hours_since_maintenance": hours_maint,
+            "operating_mode": op_mode,
+            "rul_hours": rul,
+            "failure_probability": failure_prob,
+            "failure_detected": failure_detected,
+            "failure_type": failure_type,
+            "bearing_probability": bearing_prob,
+            "overheat_probability": overheat_prob
+        },
+        headers=headers
+    )
+
+    # 3. Créer événements si seuils dépassés
+    if temp > 78:
+        requests.post(f"{SUPABASE_URL}/rest/v1/events", headers=headers, json={
+            "machine_id": "machine_01",
+            "event_type": "temperature_alert",
+            "severity": "critical" if temp > 85 else "warning",
+            "title": "Alerte Température",
+            "message": f"Température {temp}°C dépasse le seuil de 78°C",
+            "value": temp, "threshold": 78.0
+        })
+
+    if vib > 3.5:
+        requests.post(f"{SUPABASE_URL}/rest/v1/events", headers=headers, json={
+            "machine_id": "machine_01",
+            "event_type": "vibration_alert",
+            "severity": "critical" if vib > 5.0 else "warning",
+            "title": "Alerte Vibration",
+            "message": f"Vibration {vib} mm/s dépasse le seuil de 3.5 mm/s",
+            "value": vib, "threshold": 3.5
+        })
+
+    if failure_detected and failure_type:
+        label = "Défaillance de Roulement" if failure_type == "bearing" else "Surchauffe Moteur"
+        requests.post(f"{SUPABASE_URL}/rest/v1/events", headers=headers, json={
+            "machine_id": "machine_01",
+            "event_type": "failure_alert",
+            "severity": "critical",
+            "title": f"Défaillance : {label}",
+            "message": f"Modèle IA : {label} détectée — probabilité {round(failure_prob*100)}%"
+        })
+
+
+## ✅ SEUILS UTILISÉS PAR L'APPLICATION MOBILE
+
+  Température critique    : > 78°C
+  Vibration critique      : > 3.5 mm/s
+  Probabilité de panne    : > 65% (0.65)
+  Types de défaillance    : 'bearing' | 'motor_overheat'
+
+
+## ⚡ FONCTIONNEMENT REALTIME
+
+L'app mobile écoute les tables en temps réel via WebSocket Supabase.
+Dès qu'une nouvelle ligne est insérée, l'app met à jour automatiquement :
+  ✔ Valeurs température et vibration affichées
+  ✔ Graphiques courbes 24h
+  ✔ Prédictions RUL, probabilité, type de panne
+  ✔ Notifications push si seuils dépassés
+  ✔ Liste des événements dans l'écran Events
