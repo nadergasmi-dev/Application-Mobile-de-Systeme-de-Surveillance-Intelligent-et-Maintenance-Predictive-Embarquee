@@ -19,7 +19,6 @@ const MACHINE_TYPE_LABELS: Record<string, string> = {
 const OPERATING_MODE_LABELS: Record<string, string> = {
   '0': 'Idle', '1': 'Normal', '2': 'Peak',
 };
-// ftype=0 → Bearing Failure | ftype=1 → Motor Overheat
 const FAILURE_TYPE_LABELS: Record<number, string> = {
   0: 'Bearing Failure', 1: 'Motor Overheat',
 };
@@ -29,7 +28,6 @@ const TEMP_THRESHOLD = 78;
 const VIB_THRESHOLD  = 3.5;
 const FAIL_THRESHOLD = 65;
 
-// ─── Chart view types ────────────────────────────────────
 type ChartView = 'second' | 'minute' | 'hour';
 
 interface RawSensor {
@@ -62,24 +60,28 @@ interface MotorConfig {
   hours_sm: number;
 }
 
-// ─── Aggregate helpers ───────────────────────────────────
-const toHHMM = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const pad = (n: number) => String(n).padStart(2, '0');
 
-const toHHMM_noSec = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+// ─── Build chart points from raw rows ────────────────────
+// ✅ No timezone comparison — just format the dates for display
+function buildSecondPoints(rows: RawSensor[]): ChartPoint[] {
+  return rows.map(r => {
+    const d = new Date(r.created_at);
+    return {
+      label: `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+      temperature: r.temperature ?? 0,
+      vibration:   r.rms ?? 0,
+    };
+  });
+}
 
-const toHH = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }).slice(0, 5);
-
-// Group sensor rows into buckets (by minute or hour) and average
-function aggregateByBucket(
+function buildAggregatedPoints(
   rows: RawSensor[],
-  getBucket: (iso: string) => string
+  getBucket: (d: Date) => string
 ): ChartPoint[] {
   const buckets: Record<string, { temps: number[]; vibs: number[] }> = {};
   for (const r of rows) {
-    const key = getBucket(r.created_at);
+    const key = getBucket(new Date(r.created_at));
     if (!buckets[key]) buckets[key] = { temps: [], vibs: [] };
     buckets[key].temps.push(r.temperature ?? 0);
     buckets[key].vibs.push(r.rms ?? 0);
@@ -95,8 +97,11 @@ export default function MonitoringDashboard() {
   const navigate = useNavigate();
   const supabase = createClient();
 
-  // Raw sensor rows stored for aggregation
-  const [rawSensors, setRawSensors]   = useState<RawSensor[]>([]);
+  // ✅ Separate state per tab — each fetched independently from Supabase
+  const [secondData, setSecondData] = useState<ChartPoint[]>([]);
+  const [minuteData, setMinuteData] = useState<ChartPoint[]>([]);
+  const [hourData,   setHourData]   = useState<ChartPoint[]>([]);
+
   const [prediction, setPrediction]   = useState<AiPrediction | null>(null);
   const [motorConfig, setMotorConfig] = useState<MotorConfig | null>(null);
   const [loading, setLoading]         = useState(true);
@@ -120,51 +125,12 @@ export default function MonitoringDashboard() {
     : 0;
   const failureDetected = prediction?.failure === 1;
 
-  // ─── Health status ────────────────────────────────────
   const getHealthStatus = () => {
     if (failureDetected)         return { status: 'FAULT',   color: 'bg-red-500',   icon: <XCircle className="w-6 h-6" /> };
     if (failureProbability > 40) return { status: 'WARNING', color: 'bg-[#FFB84E]', icon: <AlertCircle className="w-6 h-6" /> };
     return                              { status: 'NORMAL',  color: 'bg-green-500', icon: <CheckCircle className="w-6 h-6" /> };
   };
   const health = getHealthStatus();
-
-  // ─── Chart data computed from rawSensors + chartView ──
-  const chartData: ChartPoint[] = (() => {
-    if (rawSensors.length === 0) return [];
-
-    if (chartView === 'second') {
-      // Last 60 seconds — one point per row
-      const cutoff = new Date(Date.now() - 60 * 1000).toISOString();
-      return rawSensors
-        .filter(r => r.created_at >= cutoff)
-        .map(r => ({
-          label:       toHHMM(r.created_at),
-          temperature: r.temperature ?? 0,
-          vibration:   r.rms ?? 0,
-        }));
-    }
-
-    if (chartView === 'minute') {
-      // Last 60 minutes — average per minute
-      const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const filtered = rawSensors.filter(r => new Date(r.created_at).getTime() >= cutoffMs);
-      // Bucket key = "HH:MM"
-      const getBucket = (iso: string) => {
-        const d = new Date(iso);
-        return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-      };
-      return aggregateByBucket(filtered, getBucket);
-    }
-
-    // hour — last 24 hours — average per hour
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const filtered = rawSensors.filter(r => new Date(r.created_at).getTime() >= cutoffMs);
-    const getBucket = (iso: string) => {
-      const d = new Date(iso);
-      return `${String(d.getHours()).padStart(2,'0')}:00`;
-    };
-    return aggregateByBucket(filtered, getBucket);
-  })();
 
   // ─── Notifications ────────────────────────────────────
   useEffect(() => {
@@ -176,7 +142,9 @@ export default function MonitoringDashboard() {
     if (!Capacitor.isNativePlatform()) return;
     try {
       await LocalNotifications.schedule({
-        notifications: [{ title, body, id: notifId.current++, schedule: { at: new Date(Date.now() + 100) }, sound: 'default', actionTypeId: '', extra: null }]
+        notifications: [{ title, body, id: notifId.current++,
+          schedule: { at: new Date(Date.now() + 100) },
+          sound: 'default', actionTypeId: '', extra: null }]
       });
     } catch {}
   };
@@ -185,32 +153,67 @@ export default function MonitoringDashboard() {
     const now = Date.now();
     if (temp > TEMP_THRESHOLD && now - lastTempNotif.current > COOLDOWN) {
       lastTempNotif.current = now;
-      sendNotification('🌡️ Temperature Alert', `Temperature ${temp.toFixed(1)}°C exceeds ${TEMP_THRESHOLD}°C!`);
+      sendNotification('Temperature Alert', `Temperature ${temp.toFixed(1)} C exceeds ${TEMP_THRESHOLD} C!`);
     }
     if (vib > VIB_THRESHOLD && now - lastVibNotif.current > COOLDOWN) {
       lastVibNotif.current = now;
-      sendNotification('⚡ Vibration Alert', `Vibration ${vib.toFixed(2)} mm/s exceeds ${VIB_THRESHOLD} mm/s!`);
+      sendNotification('Vibration Alert', `Vibration ${vib.toFixed(2)} mm/s exceeds ${VIB_THRESHOLD} mm/s!`);
     }
     if (failProb > FAIL_THRESHOLD && now - lastFailNotif.current > COOLDOWN) {
       lastFailNotif.current = now;
-      sendNotification('🚨 Failure Risk Detected', `Failure probability: ${failProb}% — Inspection required.`);
+      sendNotification('Failure Risk Detected', `Failure probability: ${failProb}% — Inspection required.`);
     }
   };
 
-  // ─── Fetch data ───────────────────────────────────────
-  const fetchData = async () => {
+  // ─── Fetch sensor data — all windows via Supabase ─────
+  // ✅ PostgreSQL handles timezone correctly with NOW() - interval
+  const fetchSensorData = async () => {
     try {
-      // 1. All sensor data from last 24h (needed for all 3 views)
-      const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const { data: sensors } = await supabase
+      // ── Per Second: last 60 seconds ────────────────────
+      const { data: sec } = await supabase
         .from('sensor_data')
         .select('id, created_at, temperature, rms')
-        .gte('created_at', since24h)
+        .gte('created_at', new Date(Date.now() - 60 * 1000).toISOString())
         .order('created_at', { ascending: true });
 
-      if (sensors) setRawSensors(sensors as RawSensor[]);
+      if (sec) setSecondData(buildSecondPoints(sec as RawSensor[]));
 
-      // 2. Latest AI prediction
+      // ── Per Minute: last 60 minutes ────────────────────
+      const { data: min } = await supabase
+        .from('sensor_data')
+        .select('id, created_at, temperature, rms')
+        .gte('created_at', new Date(Date.now() - 60 * 60 * 1000).toISOString())
+        .order('created_at', { ascending: true });
+
+      if (min) {
+        setMinuteData(buildAggregatedPoints(
+          min as RawSensor[],
+          d => `${pad(d.getHours())}:${pad(d.getMinutes())}`
+        ));
+      }
+
+      // ── Per Hour: last 24 hours ─────────────────────────
+      const { data: hr } = await supabase
+        .from('sensor_data')
+        .select('id, created_at, temperature, rms')
+        .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+        .order('created_at', { ascending: true });
+
+      if (hr) {
+        setHourData(buildAggregatedPoints(
+          hr as RawSensor[],
+          d => `${pad(d.getHours())}:00`
+        ));
+      }
+
+    } catch (err) {
+      console.error('Sensor fetch error:', err);
+    }
+  };
+
+  // ─── Fetch AI + config ────────────────────────────────
+  const fetchPredictions = async () => {
+    try {
       const { data: ai } = await supabase
         .from('ai_models')
         .select('failure, failure_conf, ftype, ftype_conf, rulhours, avg_temp, avg_rms, created_at')
@@ -220,14 +223,14 @@ export default function MonitoringDashboard() {
 
       if (ai) {
         setPrediction(ai as AiPrediction);
-        setLastUpdate(new Date(ai.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }));
+        const d = new Date(ai.created_at);
+        setLastUpdate(`${pad(d.getHours())}:${pad(d.getMinutes())}`);
         const prob = ai.failure === 1
           ? Math.round(ai.failure_conf * 100)
           : Math.round((1 - ai.failure_conf) * 100);
         checkThresholds(ai.avg_temp ?? 0, ai.avg_rms ?? 0, prob);
       }
 
-      // 3. Motor config
       const { data: config } = await supabase
         .from('motor_config')
         .select('motor_type, operating_mode, hours_sm')
@@ -238,17 +241,34 @@ export default function MonitoringDashboard() {
       if (config) setMotorConfig(config as MotorConfig);
 
     } catch (err) {
-      console.error('Fetch error:', err);
+      console.error('Prediction fetch error:', err);
     } finally {
       setLoading(false);
     }
   };
 
+  const fetchAll = async () => {
+    await Promise.all([fetchSensorData(), fetchPredictions()]);
+  };
+
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000); // refresh every 5s
+    fetchAll();
+    const interval = setInterval(fetchAll, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // ─── Active chart data ────────────────────────────────
+  const chartData: ChartPoint[] = {
+    second: secondData,
+    minute: minuteData,
+    hour:   hourData,
+  }[chartView];
+
+  const chartSubtitle = {
+    second: `last 60 s — ${secondData.length} pts`,
+    minute: `avg/min · last 60 min — ${minuteData.length} pts`,
+    hour:   `avg/hour · last 24 h — ${hourData.length} pts`,
+  }[chartView];
 
   const handleLogout = () => {
     localStorage.removeItem('machineConfig');
@@ -266,7 +286,6 @@ export default function MonitoringDashboard() {
     );
   }
 
-  // ─── Chart tab config ─────────────────────────────────
   const chartTabs: { key: ChartView; label: string }[] = [
     { key: 'second', label: 'Per Second' },
     { key: 'minute', label: 'Per Minute' },
@@ -287,7 +306,7 @@ export default function MonitoringDashboard() {
           </div>
           <div className="flex items-center space-x-2">
             {lastUpdate && <span className="text-gray-500 text-xs hidden sm:block">Updated: {lastUpdate}</span>}
-            <button onClick={fetchData} className="p-2 text-gray-400 hover:text-[#FFB84E] transition-colors">
+            <button onClick={fetchAll} className="p-2 text-gray-400 hover:text-[#FFB84E] transition-colors">
               <RefreshCw className="w-5 h-5" />
             </button>
             <button onClick={() => navigate('/machine-setup')} className="p-2 text-gray-400 hover:text-[#FFB84E] transition-colors">
@@ -345,7 +364,6 @@ export default function MonitoringDashboard() {
               <span>AI PREDICTIONS</span>
             </h3>
             <div className="space-y-4">
-
               {/* RUL */}
               <div className="bg-[#0f0f0f] rounded-lg p-4 border border-gray-800">
                 <div className="flex items-center justify-between mb-2">
@@ -419,12 +437,12 @@ export default function MonitoringDashboard() {
             <div className="flex items-center space-x-2 mb-3">
               <Thermometer className={`w-5 h-5 ${currentTemp > TEMP_THRESHOLD ? 'text-red-400' : 'text-orange-400'}`} />
               <p className="text-gray-300 text-xs font-medium">TEMPERATURE</p>
-              {currentTemp > TEMP_THRESHOLD && <span className="text-red-400 text-xs animate-pulse">⚠️</span>}
+              {currentTemp > TEMP_THRESHOLD && <span className="text-red-400 text-xs animate-pulse">!</span>}
             </div>
             <p className={`text-4xl font-bold ${currentTemp > TEMP_THRESHOLD ? 'text-red-400' : 'text-white'}`}>
               {currentTemp.toFixed(1)}
             </p>
-            <p className="text-orange-300 text-sm mt-1">°C</p>
+            <p className="text-orange-300 text-sm mt-1">C</p>
           </div>
 
           <div className={`rounded-xl p-5 border ${currentVibration > VIB_THRESHOLD
@@ -433,7 +451,7 @@ export default function MonitoringDashboard() {
             <div className="flex items-center space-x-2 mb-3">
               <Waves className={`w-5 h-5 ${currentVibration > VIB_THRESHOLD ? 'text-red-400' : 'text-blue-400'}`} />
               <p className="text-gray-300 text-xs font-medium">VIBRATION RMS</p>
-              {currentVibration > VIB_THRESHOLD && <span className="text-red-400 text-xs animate-pulse">⚠️</span>}
+              {currentVibration > VIB_THRESHOLD && <span className="text-red-400 text-xs animate-pulse">!</span>}
             </div>
             <p className={`text-4xl font-bold ${currentVibration > VIB_THRESHOLD ? 'text-red-400' : 'text-white'}`}>
               {currentVibration.toFixed(2)}
@@ -442,64 +460,49 @@ export default function MonitoringDashboard() {
           </div>
         </div>
 
-        {/* ─── Charts with tabs ──────────────────────────── */}
+        {/* Charts with tabs */}
         <div className="bg-[#1a1a1a] rounded-xl p-5 border border-gray-800">
-
-          {/* Tab selector */}
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-1">
             <h3 className="text-gray-400 text-sm font-medium">SENSOR TRENDS</h3>
             <div className="flex space-x-1 bg-[#0f0f0f] rounded-lg p-1">
               {chartTabs.map(tab => (
-                <button
-                  key={tab.key}
-                  onClick={() => setChartView(tab.key)}
+                <button key={tab.key} onClick={() => setChartView(tab.key)}
                   className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
                     chartView === tab.key
                       ? 'bg-[#FFB84E] text-[#262525]'
                       : 'text-gray-400 hover:text-white'
-                  }`}
-                >
+                  }`}>
                   {tab.label}
                 </button>
               ))}
             </div>
           </div>
+          <p className="text-gray-600 text-xs mb-4">{chartSubtitle}</p>
 
           {chartData.length === 0 ? (
-            <p className="text-gray-500 text-sm text-center py-8">
-              {chartView === 'second' ? 'No data in last 60 seconds'
-               : chartView === 'minute' ? 'No data in last 60 minutes'
-               : 'No data in last 24 hours'}
-            </p>
+            <div className="text-center py-8">
+              <p className="text-gray-500 text-sm">No data available</p>
+              <p className="text-gray-600 text-xs mt-1">
+                {chartView === 'second' ? 'Waiting for data in the last 60 seconds...'
+                 : chartView === 'minute' ? 'No data in the last 60 minutes'
+                 : 'No data in the last 24 hours'}
+              </p>
+            </div>
           ) : (
             <>
-              {/* Temperature chart */}
-              <p className="text-gray-500 text-xs mb-2">
-                Temperature (°C) — {
-                  chartView === 'second' ? 'last 60 seconds'
-                  : chartView === 'minute' ? 'avg per minute · last hour'
-                  : 'avg per hour · last 24h'
-                }
-              </p>
-              <ResponsiveContainer width="100%" height={180}>
+              <p className="text-gray-500 text-xs mb-2">Temperature (C)</p>
+              <ResponsiveContainer width="100%" height={175}>
                 <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#333" />
                   <XAxis dataKey="label" stroke="#666" tick={{ fill: '#666', fontSize: 9 }} interval="preserveStartEnd" />
                   <YAxis stroke="#666" tick={{ fill: '#666', fontSize: 10 }} />
                   <Tooltip contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #FFB84E', borderRadius: '8px', color: '#fff' }} labelStyle={{ color: '#FFB84E' }} />
-                  <Line type="monotone" dataKey="temperature" stroke="#FFB84E" strokeWidth={2} dot={false} name="Temp (°C)" />
+                  <Line type="monotone" dataKey="temperature" stroke="#FFB84E" strokeWidth={2} dot={false} name="Temp (C)" />
                 </LineChart>
               </ResponsiveContainer>
 
-              {/* Vibration chart */}
-              <p className="text-gray-500 text-xs mb-2 mt-5">
-                Vibration RMS (mm/s) — {
-                  chartView === 'second' ? 'last 60 seconds'
-                  : chartView === 'minute' ? 'avg per minute · last hour'
-                  : 'avg per hour · last 24h'
-                }
-              </p>
-              <ResponsiveContainer width="100%" height={180}>
+              <p className="text-gray-500 text-xs mb-2 mt-5">Vibration RMS (mm/s)</p>
+              <ResponsiveContainer width="100%" height={175}>
                 <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#333" />
                   <XAxis dataKey="label" stroke="#666" tick={{ fill: '#666', fontSize: 9 }} interval="preserveStartEnd" />
