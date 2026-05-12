@@ -82,10 +82,7 @@ export default function OAuthCallback() {
               return;
             }
 
-            if (data.session) {
-              window.history.replaceState({}, document.title, window.location.pathname);
-              navigate('/machine-setup', { replace: true });
-            }
+
           } else {
             const { data: { session } } = await supabase.auth.getSession();
             if (session) {

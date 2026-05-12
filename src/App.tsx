@@ -13,9 +13,7 @@ import ForgotPasswordScreen from "./components/ForgotPasswordScreen";
 import VerifyResetCodeScreen from "./components/VerifyResetCodeScreen";
 import MachineSetupScreen from "./components/MachineSetupScreen";
 import MonitoringDashboard from "./components/MonitoringDashboard";
-import History from "./components/History";
 import Events from "./components/Events";
-import Settings from "./components/Settings";
 import OAuthCallback from "./components/OAuthCallback";
 import { createClient } from "./utils/supabase/client";
 import { ThemeProvider } from "./contexts/ThemeContext";
@@ -175,32 +173,13 @@ function App() {
                   <Navigate to="/login" />
                 )
               }
-            />
-            <Route
-              path="/history"
-              element={
-                isAuthenticated ? (
-                  <History />
-                ) : (
-                  <Navigate to="/login" />
-                )
-              }
+
             />
             <Route
               path="/events"
               element={
                 isAuthenticated ? (
                   <Events />
-                ) : (
-                  <Navigate to="/login" />
-                )
-              }
-            />
-            <Route
-              path="/settings"
-              element={
-                isAuthenticated ? (
-                  <Settings onLogout={handleLogout} />
                 ) : (
                   <Navigate to="/login" />
                 )
