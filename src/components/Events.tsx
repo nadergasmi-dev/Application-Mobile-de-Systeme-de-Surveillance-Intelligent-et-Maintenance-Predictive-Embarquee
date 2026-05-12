@@ -2,32 +2,104 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   AlertTriangle, ArrowLeft, AlertCircle, XCircle,
-  CheckCircle, RefreshCw, Thermometer, Waves, Activity
+  CheckCircle, RefreshCw, Thermometer, Waves
 } from 'lucide-react';
 import { createClient } from '../utils/supabase/client';
 
-interface Event {
+// ─── 🔧 Seuils locaux — modifie ici ──────────────────────
+const THRESHOLDS = {
+  temperature: { warn: 60, alarm: 80 },
+  vibration:   { warn: 1.3, alarm: 2.0 },
+};
+
+// ─── Types ────────────────────────────────────────────────
+interface SensorRow {
   id: number;
   created_at: string;
-  source: string;
-  level: string;
-  message: string;
-  value: number;
-  threshold: number;
+  temperature: number;
+  rms: number;
 }
 
-// ─── Level badge style ────────────────────────────────────
+interface LocalEvent {
+  id: string;
+  created_at: string;
+  source: 'temperature' | 'vibration';
+  level: 'alarm' | 'warn';
+  value: number;
+  threshold: number;
+  message: string;
+}
+
+// ─── Générer les events localement depuis sensor_data ────
+function generateEvents(rows: SensorRow[]): LocalEvent[] {
+  const events: LocalEvent[] = [];
+
+  for (const r of rows) {
+    // ── Temperature
+    if (r.temperature >= THRESHOLDS.temperature.alarm) {
+      events.push({
+        id:         `temp-alarm-${r.id}`,
+        created_at: r.created_at,
+        source:     'temperature',
+        level:      'alarm',
+        value:      r.temperature,
+        threshold:  THRESHOLDS.temperature.alarm,
+        message:    `ALARM: Temperature ${r.temperature.toFixed(1)}°C exceeded ${THRESHOLDS.temperature.alarm}°C limit`,
+      });
+    } else if (r.temperature >= THRESHOLDS.temperature.warn) {
+      events.push({
+        id:         `temp-warn-${r.id}`,
+        created_at: r.created_at,
+        source:     'temperature',
+        level:      'warn',
+        value:      r.temperature,
+        threshold:  THRESHOLDS.temperature.warn,
+        message:    `WARN: Temperature ${r.temperature.toFixed(1)}°C exceeded ${THRESHOLDS.temperature.warn}°C limit`,
+      });
+    }
+
+    // ── Vibration RMS
+    if (r.rms >= THRESHOLDS.vibration.alarm) {
+      events.push({
+        id:         `vib-alarm-${r.id}`,
+        created_at: r.created_at,
+        source:     'vibration',
+        level:      'alarm',
+        value:      r.rms,
+        threshold:  THRESHOLDS.vibration.alarm,
+        message:    `ALARM: Vibration RMS ${r.rms.toFixed(2)} mm/s exceeded ${THRESHOLDS.vibration.alarm} mm/s limit`,
+      });
+    } else if (r.rms >= THRESHOLDS.vibration.warn) {
+      events.push({
+        id:         `vib-warn-${r.id}`,
+        created_at: r.created_at,
+        source:     'vibration',
+        level:      'warn',
+        value:      r.rms,
+        threshold:  THRESHOLDS.vibration.warn,
+        message:    `WARN: Vibration RMS ${r.rms.toFixed(2)} mm/s exceeded ${THRESHOLDS.vibration.warn} mm/s limit`,
+      });
+    }
+  }
+
+  // Plus récent en premier
+  return events.sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+}
+
+// ─── Level style ──────────────────────────────────────────
 const getLevelStyle = (level: string) => {
-  switch (level?.toLowerCase()) {
-    case 'critical': case 'fault': case 'error':
+  switch (level) {
+    case 'alarm':
       return {
         bg:    'bg-red-500/10 border-red-500/30',
         text:  'text-red-400',
         icon:  <XCircle className="w-5 h-5 text-red-400" />,
         badge: 'bg-red-500/20 text-red-300',
-        label: 'Critical',
+        label: 'Alarm',
       };
-    case 'warning': case 'warn':
+    case 'warn':
       return {
         bg:    'bg-orange-500/10 border-orange-500/30',
         text:  'text-[#FFB84E]',
@@ -46,50 +118,44 @@ const getLevelStyle = (level: string) => {
   }
 };
 
-// ─── Source icon ──────────────────────────────────────────
-const getSourceIcon = (source: string) => {
-  switch (source?.toLowerCase()) {
-    case 'temperature':
-      return <Thermometer className="w-4 h-4 text-orange-400" />;
-    case 'vibration':
-      return <Waves className="w-4 h-4 text-blue-400" />;
-    default:
-      return <Activity className="w-4 h-4 text-gray-400" />;
-  }
-};
+const getSourceIcon = (source: string) =>
+  source === 'temperature'
+    ? <Thermometer className="w-4 h-4 text-orange-400" />
+    : <Waves className="w-4 h-4 text-blue-400" />;
 
-// ─── Source label (capitalize) ────────────────────────────
 const formatSource = (source: string) =>
-  source.charAt(0).toUpperCase() + source.slice(1).toLowerCase();
+  source.charAt(0).toUpperCase() + source.slice(1);
+
+const formatDate = (iso: string) => {
+  const d = new Date(iso);
+  return (
+    d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) +
+    ' ' +
+    d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  );
+};
 
 export default function Events() {
   const navigate = useNavigate();
   const supabase = createClient();
 
-  const [events, setEvents]     = useState<Event[]>([]);
-  const [sources, setSources]   = useState<string[]>([]);   // distinct sources from DB
-  const [filter, setFilter]     = useState<string>('all');  // 'all' or a source string
-  const [loading, setLoading]   = useState(true);
+  const [events,  setEvents]  = useState<LocalEvent[]>([]);
+  const [filter,  setFilter]  = useState<'all' | 'temperature' | 'vibration'>('all');
+  const [loading, setLoading] = useState(true);
 
-  // ─── Fetch events + distinct sources ─────────────────
+  // ─── Fetch sensor_data des dernières 24h ─────────────
   const fetchEvents = async () => {
     setLoading(true);
     try {
       const { data, error } = await supabase
-        .from('events')
-        .select('id, created_at, source, level, message, value, threshold')
+        .from('sensor_data')
+        .select('id, created_at, temperature, rms')
+        .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
         .order('created_at', { ascending: false })
-        .limit(200);
+        .limit(5000);
 
       if (!error && data) {
-        const rows = data as Event[];
-        setEvents(rows);
-
-        // Extract distinct sources dynamically
-        const distinctSources = Array.from(
-          new Set(rows.map(e => e.source?.toLowerCase()).filter(Boolean))
-        ).sort();
-        setSources(distinctSources);
+        setEvents(generateEvents(data as SensorRow[]));
       }
     } catch (err) {
       console.error('Events fetch error:', err);
@@ -100,28 +166,13 @@ export default function Events() {
 
   useEffect(() => { fetchEvents(); }, []);
 
-  // ─── Filter logic ─────────────────────────────────────
-  // 'all' → show everything
-  // 'temperature' / 'vibration' / other → match source
+  // ─── Filter ───────────────────────────────────────────
   const filteredEvents = filter === 'all'
     ? events
-    : events.filter(e => e.source?.toLowerCase() === filter);
+    : events.filter(e => e.source === filter);
 
-  // ─── Count per source (for badges on filter buttons) ──
   const countFor = (src: string) =>
-    src === 'all'
-      ? events.length
-      : events.filter(e => e.source?.toLowerCase() === src).length;
-
-  // ─── Date formatter ───────────────────────────────────
-  const formatDate = (iso: string) => {
-    const d = new Date(iso);
-    return (
-      d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) +
-      ' ' +
-      d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
-    );
-  };
+    src === 'all' ? events.length : events.filter(e => e.source === src).length;
 
   return (
     <div className="min-h-screen bg-[#262525]">
@@ -141,7 +192,7 @@ export default function Events() {
                 <span>EVENTS & ALERTS</span>
               </h1>
               <p className="text-gray-400 text-xs">
-                {filteredEvents.length} event(s)
+                {filteredEvents.length} event(s) · last 24h
                 {filter !== 'all' && ` — ${formatSource(filter)}`}
               </p>
             </div>
@@ -149,34 +200,16 @@ export default function Events() {
           <button
             onClick={fetchEvents}
             className="p-2 text-gray-400 hover:text-[#FFB84E] transition-colors"
-            title="Refresh"
           >
             <RefreshCw className="w-5 h-5" />
           </button>
         </div>
       </div>
 
-      {/* ─── Filter buttons by SOURCE ─────────────────── */}
-      <div className="px-6 pt-4 pb-2 flex flex-wrap gap-2">
-        {/* "All" button */}
-        <button
-          onClick={() => setFilter('all')}
-          className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all flex items-center space-x-1 ${
-            filter === 'all'
-              ? 'bg-[#FFB84E] text-[#262525]'
-              : 'bg-[#1a1a1a] text-gray-400 border border-gray-700 hover:border-[#FFB84E]/50'
-          }`}
-        >
-          <span>All</span>
-          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-            filter === 'all' ? 'bg-[#262525]/30' : 'bg-gray-700'
-          }`}>
-            {countFor('all')}
-          </span>
-        </button>
 
-        {/* One button per distinct source */}
-        {sources.map(src => (
+      {/* ─── Filter buttons ──────────────────────────────── */}
+      <div className="px-6 py-2 flex gap-2">
+        {(['all', 'temperature', 'vibration'] as const).map(src => (
           <button
             key={src}
             onClick={() => setFilter(src)}
@@ -186,8 +219,8 @@ export default function Events() {
                 : 'bg-[#1a1a1a] text-gray-400 border border-gray-700 hover:border-[#FFB84E]/50'
             }`}
           >
-            {getSourceIcon(src)}
-            <span>{formatSource(src)}</span>
+            {src !== 'all' && getSourceIcon(src)}
+            <span>{src === 'all' ? 'All' : formatSource(src)}</span>
             <span className={`text-xs px-1.5 py-0.5 rounded-full ${
               filter === src ? 'bg-[#262525]/30' : 'bg-gray-700'
             }`}>
@@ -197,7 +230,7 @@ export default function Events() {
         ))}
       </div>
 
-      {/* ─── Events list ─────────────────────────────── */}
+      {/* ─── Events list ─────────────────────────────────── */}
       <div className="px-6 py-3 space-y-3">
         {loading ? (
           <div className="flex items-center justify-center py-16">
@@ -206,12 +239,8 @@ export default function Events() {
         ) : filteredEvents.length === 0 ? (
           <div className="text-center py-16">
             <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4 opacity-50" />
-            <p className="text-gray-400 text-lg font-medium">No events found</p>
-            <p className="text-gray-600 text-sm mt-1">
-              {filter === 'all'
-                ? 'All systems are operating normally'
-                : `No events for source "${formatSource(filter)}"`}
-            </p>
+            <p className="text-gray-400 text-lg font-medium">No alerts</p>
+            <p className="text-gray-600 text-sm mt-1">All values within thresholds in the last 24h</p>
           </div>
         ) : (
           filteredEvents.map(event => {
@@ -225,7 +254,6 @@ export default function Events() {
                     <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${style.badge}`}>
                       {style.label}
                     </span>
-                    {/* Source badge */}
                     <span className="flex items-center space-x-1 text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded-full">
                       {getSourceIcon(event.source)}
                       <span>{formatSource(event.source)}</span>
@@ -243,15 +271,11 @@ export default function Events() {
                 <div className="flex space-x-4">
                   <span className="text-gray-500 text-xs">
                     Value:{' '}
-                    <span className="text-white font-medium">
-                      {Number(event.value).toFixed(2)}
-                    </span>
+                    <span className="text-white font-medium">{event.value.toFixed(2)}</span>
                   </span>
                   <span className="text-gray-500 text-xs">
                     Threshold:{' '}
-                    <span className="text-gray-300 font-medium">
-                      {Number(event.threshold).toFixed(2)}
-                    </span>
+                    <span className="text-gray-300 font-medium">{event.threshold.toFixed(2)}</span>
                   </span>
                 </div>
               </div>

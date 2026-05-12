@@ -62,9 +62,8 @@ interface MotorConfig {
 
 const pad = (n: number) => String(n).padStart(2, '0');
 
-// ─── Build chart points from raw rows ────────────────────
-// ✅ No timezone comparison — just format the dates for display
-function buildSecondPoints(rows: RawSensor[]): ChartPoint[] {
+// ─── Per Second: raw values ───────────────────────────────
+function buildRawPoints(rows: RawSensor[]): ChartPoint[] {
   return rows.map(r => {
     const d = new Date(r.created_at);
     return {
@@ -75,29 +74,50 @@ function buildSecondPoints(rows: RawSensor[]): ChartPoint[] {
   });
 }
 
-function buildAggregatedPoints(
+// ─── Per Minute / Per Hour: avg temp + RMS vibration ─────
+// temperature → avg arithmétique
+// vibration   → vrai RMS : √(Σx²/n)
+function buildAveragedPoints(
   rows: RawSensor[],
   getBucket: (d: Date) => string
 ): ChartPoint[] {
   const buckets: Record<string, { temps: number[]; vibs: number[] }> = {};
+  const order: string[] = [];
+
   for (const r of rows) {
     const key = getBucket(new Date(r.created_at));
-    if (!buckets[key]) buckets[key] = { temps: [], vibs: [] };
-    buckets[key].temps.push(r.temperature ?? 0);
-    buckets[key].vibs.push(r.rms ?? 0);
+    if (!buckets[key]) {
+      buckets[key] = { temps: [], vibs: [] };
+      order.push(key);
+    }
+    if (r.temperature != null) buckets[key].temps.push(r.temperature);
+    if (r.rms != null)         buckets[key].vibs.push(r.rms);
   }
-  return Object.entries(buckets).map(([label, { temps, vibs }]) => ({
-    label,
-    temperature: parseFloat((temps.reduce((a, b) => a + b, 0) / temps.length).toFixed(2)),
-    vibration:   parseFloat((vibs.reduce((a, b)  => a + b, 0) / vibs.length).toFixed(3)),
-  }));
+
+  return order.map(label => {
+    const { temps, vibs } = buckets[label];
+
+    const avgTemp = temps.length
+      ? temps.reduce((a, b) => a + b, 0) / temps.length
+      : 0;
+
+    // ✅ RMS correct : √(Σx²/n)
+    const rmsVib = vibs.length
+      ? Math.sqrt(vibs.reduce((a, b) => a + b * b, 0) / vibs.length)
+      : 0;
+
+    return {
+      label,
+      temperature: parseFloat(avgTemp.toFixed(2)),
+      vibration:   parseFloat(rmsVib.toFixed(3)),
+    };
+  });
 }
 
 export default function MonitoringDashboard() {
   const navigate = useNavigate();
   const supabase = createClient();
 
-  // ✅ Separate state per tab — each fetched independently from Supabase
   const [secondData, setSecondData] = useState<ChartPoint[]>([]);
   const [minuteData, setMinuteData] = useState<ChartPoint[]>([]);
   const [hourData,   setHourData]   = useState<ChartPoint[]>([]);
@@ -108,14 +128,12 @@ export default function MonitoringDashboard() {
   const [lastUpdate, setLastUpdate]   = useState('');
   const [chartView, setChartView]     = useState<ChartView>('second');
 
-  // Cooldown refs
   const lastTempNotif = useRef<number>(0);
   const lastVibNotif  = useRef<number>(0);
   const lastFailNotif = useRef<number>(0);
   const notifId       = useRef<number>(1);
   const COOLDOWN      = 60000;
 
-  // ─── Derived values ───────────────────────────────────
   const currentTemp      = prediction?.avg_temp ?? 0;
   const currentVibration = prediction?.avg_rms  ?? 0;
   const failureProbability = prediction
@@ -132,7 +150,6 @@ export default function MonitoringDashboard() {
   };
   const health = getHealthStatus();
 
-  // ─── Notifications ────────────────────────────────────
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
     LocalNotifications.requestPermissions().catch(console.error);
@@ -165,20 +182,18 @@ export default function MonitoringDashboard() {
     }
   };
 
-  // ─── Fetch sensor data — all windows via Supabase ─────
-  // ✅ PostgreSQL handles timezone correctly with NOW() - interval
   const fetchSensorData = async () => {
     try {
-      // ── Per Second: last 60 seconds ────────────────────
+      // ── Per Second: last 60 s — raw values
       const { data: sec } = await supabase
         .from('sensor_data')
         .select('id, created_at, temperature, rms')
         .gte('created_at', new Date(Date.now() - 60 * 1000).toISOString())
         .order('created_at', { ascending: true });
 
-      if (sec) setSecondData(buildSecondPoints(sec as RawSensor[]));
+      if (sec) setSecondData(buildRawPoints(sec as RawSensor[]));
 
-      // ── Per Minute: last 60 minutes ────────────────────
+      // ── Per Minute: last 60 min — avg temp + RMS vibration per minute
       const { data: min } = await supabase
         .from('sensor_data')
         .select('id, created_at, temperature, rms')
@@ -186,22 +201,24 @@ export default function MonitoringDashboard() {
         .order('created_at', { ascending: true });
 
       if (min) {
-        setMinuteData(buildAggregatedPoints(
+        setMinuteData(buildAveragedPoints(
           min as RawSensor[],
           d => `${pad(d.getHours())}:${pad(d.getMinutes())}`
         ));
       }
 
-      // ── Per Hour: last 24 hours ─────────────────────────
+      // ── Per Hour: last 24 h — avg temp + RMS vibration per hour
       const { data: hr } = await supabase
         .from('sensor_data')
         .select('id, created_at, temperature, rms')
         .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: false })
+        .limit(50000);
 
       if (hr) {
-        setHourData(buildAggregatedPoints(
-          hr as RawSensor[],
+        const rows = [...(hr as RawSensor[])].reverse();
+        setHourData(buildAveragedPoints(
+          rows,
           d => `${pad(d.getHours())}:00`
         ));
       }
@@ -211,7 +228,6 @@ export default function MonitoringDashboard() {
     }
   };
 
-  // ─── Fetch AI + config ────────────────────────────────
   const fetchPredictions = async () => {
     try {
       const { data: ai } = await supabase
@@ -257,7 +273,6 @@ export default function MonitoringDashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  // ─── Active chart data ────────────────────────────────
   const chartData: ChartPoint[] = {
     second: secondData,
     minute: minuteData,
@@ -265,9 +280,9 @@ export default function MonitoringDashboard() {
   }[chartView];
 
   const chartSubtitle = {
-    second: `last 60 s — ${secondData.length} pts`,
-    minute: `avg/min · last 60 min — ${minuteData.length} pts`,
-    hour:   `avg/hour · last 24 h — ${hourData.length} pts`,
+    second: `raw · last 60 s — ${secondData.length} pts`,
+    minute: `avg temp · RMS vib/min · last 60 min — ${minuteData.length} pts`,
+    hour:   `avg temp · RMS vib/hour · last 24 h — ${hourData.length} pts`,
   }[chartView];
 
   const handleLogout = () => {
@@ -364,7 +379,6 @@ export default function MonitoringDashboard() {
               <span>AI PREDICTIONS</span>
             </h3>
             <div className="space-y-4">
-              {/* RUL */}
               <div className="bg-[#0f0f0f] rounded-lg p-4 border border-gray-800">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center space-x-2">
@@ -383,7 +397,6 @@ export default function MonitoringDashboard() {
                 </div>
               </div>
 
-              {/* Failure Probability */}
               <div className="bg-[#0f0f0f] rounded-lg p-4 border border-gray-800">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center space-x-2">
@@ -405,7 +418,6 @@ export default function MonitoringDashboard() {
                 </div>
               </div>
 
-              {/* Failure Type — only if failure=1 */}
               {failureDetected && (
                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
                   <div className="flex items-center space-x-2 mb-3">
@@ -508,7 +520,7 @@ export default function MonitoringDashboard() {
                   <XAxis dataKey="label" stroke="#666" tick={{ fill: '#666', fontSize: 9 }} interval="preserveStartEnd" />
                   <YAxis stroke="#666" tick={{ fill: '#666', fontSize: 10 }} />
                   <Tooltip contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #60a5fa', borderRadius: '8px', color: '#fff' }} labelStyle={{ color: '#60a5fa' }} />
-                  <Line type="monotone" dataKey="vibration" stroke="#60a5fa" strokeWidth={2} dot={false} name="Vibration (mm/s)" />
+                  <Line type="monotone" dataKey="vibration" stroke="#60a5fa" strokeWidth={2} dot={false} name="Vibration RMS (mm/s)" />
                 </LineChart>
               </ResponsiveContainer>
             </>
