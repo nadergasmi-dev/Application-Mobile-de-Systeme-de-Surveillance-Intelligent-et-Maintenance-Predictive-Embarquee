@@ -5,11 +5,29 @@ import {
   CheckCircle, RefreshCw, Thermometer, Waves
 } from 'lucide-react';
 import { createClient } from '../utils/supabase/client';
+import { getThresholds } from '../config/thresholds';
 
-// ─── 🔧 Seuils locaux — modifie ici ──────────────────────
-const THRESHOLDS = {
-  temperature: { warn: 60, alarm: 80 },
-  vibration:   { warn: 1.3, alarm: 2.0 },
+const MACHINE_TYPE_LOOKUP: Record<string, string> = {
+  '0': 'cnc',
+  '1': 'compressor',
+  '2': 'pump',
+  '3': 'robotic_arm',
+  cnc: 'cnc',
+  compressor: 'compressor',
+  pump: 'pump',
+  robotic_arm: 'robotic_arm',
+};
+
+const getMachineType = () => {
+  if (typeof window === 'undefined') return 'cnc';
+  try {
+    const config = localStorage.getItem('machineConfig');
+    if (!config) return 'cnc';
+    const parsed = JSON.parse(config) as { machineType?: string };
+    return MACHINE_TYPE_LOOKUP[parsed.machineType ?? ''] ?? 'cnc';
+  } catch {
+    return 'cnc';
+  }
 };
 
 // ─── Types ────────────────────────────────────────────────
@@ -33,51 +51,52 @@ interface LocalEvent {
 // ─── Générer les events localement depuis sensor_data ────
 function generateEvents(rows: SensorRow[]): LocalEvent[] {
   const events: LocalEvent[] = [];
+  const thresholds = getThresholds(getMachineType());
 
   for (const r of rows) {
     // ── Temperature
-    if (r.temperature >= THRESHOLDS.temperature.alarm) {
+    if (r.temperature >= thresholds.temperature.alarm) {
       events.push({
         id:         `temp-alarm-${r.id}`,
         created_at: r.created_at,
         source:     'temperature',
         level:      'alarm',
         value:      r.temperature,
-        threshold:  THRESHOLDS.temperature.alarm,
-        message:    `ALARM: Temperature ${r.temperature.toFixed(1)}°C exceeded ${THRESHOLDS.temperature.alarm}°C limit`,
+        threshold:  thresholds.temperature.alarm,
+        message:    `ALARM: Temperature ${r.temperature.toFixed(1)}°C exceeded ${thresholds.temperature.alarm}°C limit`,
       });
-    } else if (r.temperature >= THRESHOLDS.temperature.warn) {
+    } else if (r.temperature >= thresholds.temperature.warn) {
       events.push({
         id:         `temp-warn-${r.id}`,
         created_at: r.created_at,
         source:     'temperature',
         level:      'warn',
         value:      r.temperature,
-        threshold:  THRESHOLDS.temperature.warn,
-        message:    `WARN: Temperature ${r.temperature.toFixed(1)}°C exceeded ${THRESHOLDS.temperature.warn}°C limit`,
+        threshold:  thresholds.temperature.warn,
+        message:    `WARN: Temperature ${r.temperature.toFixed(1)}°C exceeded ${thresholds.temperature.warn}°C limit`,
       });
     }
 
     // ── Vibration RMS
-    if (r.rms >= THRESHOLDS.vibration.alarm) {
+    if (r.rms >= thresholds.vibration.alarm) {
       events.push({
         id:         `vib-alarm-${r.id}`,
         created_at: r.created_at,
         source:     'vibration',
         level:      'alarm',
         value:      r.rms,
-        threshold:  THRESHOLDS.vibration.alarm,
-        message:    `ALARM: Vibration RMS ${r.rms.toFixed(2)} mm/s exceeded ${THRESHOLDS.vibration.alarm} mm/s limit`,
+        threshold:  thresholds.vibration.alarm,
+        message:    `ALARM: Vibration RMS ${r.rms.toFixed(2)} mm/s exceeded ${thresholds.vibration.alarm} mm/s limit`,
       });
-    } else if (r.rms >= THRESHOLDS.vibration.warn) {
+    } else if (r.rms >= thresholds.vibration.warn) {
       events.push({
         id:         `vib-warn-${r.id}`,
         created_at: r.created_at,
         source:     'vibration',
         level:      'warn',
         value:      r.rms,
-        threshold:  THRESHOLDS.vibration.warn,
-        message:    `WARN: Vibration RMS ${r.rms.toFixed(2)} mm/s exceeded ${THRESHOLDS.vibration.warn} mm/s limit`,
+        threshold:  thresholds.vibration.warn,
+        message:    `WARN: Vibration RMS ${r.rms.toFixed(2)} mm/s exceeded ${thresholds.vibration.warn} mm/s limit`,
       });
     }
   }

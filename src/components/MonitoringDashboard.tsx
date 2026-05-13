@@ -11,6 +11,7 @@ import motorLogo from '../imports/MOTOR_(2).png';
 import { createClient } from '../utils/supabase/client';
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import { getThresholds } from '../config/thresholds';
 
 // ─── Labels ──────────────────────────────────────────────
 const MACHINE_TYPE_LABELS: Record<string, string> = {
@@ -23,9 +24,6 @@ const FAILURE_TYPE_LABELS: Record<number, string> = {
   0: 'Bearing Failure', 1: 'Motor Overheat',
 };
 
-// ─── Alert thresholds ────────────────────────────────────
-const TEMP_THRESHOLD = 78;
-const VIB_THRESHOLD  = 3.5;
 const FAIL_THRESHOLD = 65;
 
 type ChartView = 'second' | 'minute' | 'hour';
@@ -143,6 +141,12 @@ export default function MonitoringDashboard() {
     : 0;
   const failureDetected = prediction?.failure === 1;
 
+  const thresholds = getThresholds(motorConfig?.motor_type);
+  const tempWarn = thresholds.temperature.warn;
+  const tempAlarm = thresholds.temperature.alarm;
+  const vibWarn = thresholds.vibration.warn;
+  const vibAlarm = thresholds.vibration.alarm;
+
   const getHealthStatus = () => {
     if (failureDetected)         return { status: 'FAULT',   color: 'bg-red-500',   icon: <XCircle className="w-6 h-6" /> };
     if (failureProbability > 40) return { status: 'WARNING', color: 'bg-[#FFB84E]', icon: <AlertCircle className="w-6 h-6" /> };
@@ -168,13 +172,22 @@ export default function MonitoringDashboard() {
 
   const checkThresholds = (temp: number, vib: number, failProb: number) => {
     const now = Date.now();
-    if (temp > TEMP_THRESHOLD && now - lastTempNotif.current > COOLDOWN) {
+    const tempThreshold = temp > tempAlarm ? tempAlarm : tempWarn;
+    const vibThreshold = vib > vibAlarm ? vibAlarm : vibWarn;
+
+    if (temp > tempWarn && now - lastTempNotif.current > COOLDOWN) {
       lastTempNotif.current = now;
-      sendNotification('Temperature Alert', `Temperature ${temp.toFixed(1)} C exceeds ${TEMP_THRESHOLD} C!`);
+      sendNotification(
+        'Temperature Alert',
+        `Temperature ${temp.toFixed(1)} C exceeds ${tempThreshold} C threshold!`
+      );
     }
-    if (vib > VIB_THRESHOLD && now - lastVibNotif.current > COOLDOWN) {
+    if (vib > vibWarn && now - lastVibNotif.current > COOLDOWN) {
       lastVibNotif.current = now;
-      sendNotification('Vibration Alert', `Vibration ${vib.toFixed(2)} mm/s exceeds ${VIB_THRESHOLD} mm/s!`);
+      sendNotification(
+        'Vibration Alert',
+        `Vibration ${vib.toFixed(2)} mm/s exceeds ${vibThreshold} mm/s threshold!`
+      );
     }
     if (failProb > FAIL_THRESHOLD && now - lastFailNotif.current > COOLDOWN) {
       lastFailNotif.current = now;
@@ -443,29 +456,33 @@ export default function MonitoringDashboard() {
 
         {/* Real-time Sensor Values */}
         <div className="grid grid-cols-2 gap-4">
-          <div className={`rounded-xl p-5 border ${currentTemp > TEMP_THRESHOLD
+          <div className={`rounded-xl p-5 border ${currentTemp > tempAlarm
             ? 'bg-red-500/20 border-red-500/50'
-            : 'bg-gradient-to-br from-orange-500/10 to-red-500/10 border-orange-500/20'}`}>
+            : currentTemp > tempWarn
+              ? 'bg-[#FFB84E]/10 border-[#FFB84E]/20'
+              : 'bg-gradient-to-br from-orange-500/10 to-red-500/10 border-orange-500/20'}`}>
             <div className="flex items-center space-x-2 mb-3">
-              <Thermometer className={`w-5 h-5 ${currentTemp > TEMP_THRESHOLD ? 'text-red-400' : 'text-orange-400'}`} />
+              <Thermometer className={`w-5 h-5 ${currentTemp > tempAlarm ? 'text-red-400' : currentTemp > tempWarn ? 'text-[#FFB84E]' : 'text-orange-400'}`} />
               <p className="text-gray-300 text-xs font-medium">TEMPERATURE</p>
-              {currentTemp > TEMP_THRESHOLD && <span className="text-red-400 text-xs animate-pulse">!</span>}
+              {currentTemp > tempWarn && <span className="text-red-400 text-xs animate-pulse">!</span>}
             </div>
-            <p className={`text-4xl font-bold ${currentTemp > TEMP_THRESHOLD ? 'text-red-400' : 'text-white'}`}>
+            <p className={`text-4xl font-bold ${currentTemp > tempAlarm ? 'text-red-400' : currentTemp > tempWarn ? 'text-[#FFB84E]' : 'text-white'}`}>
               {currentTemp.toFixed(1)}
             </p>
             <p className="text-orange-300 text-sm mt-1">C</p>
           </div>
 
-          <div className={`rounded-xl p-5 border ${currentVibration > VIB_THRESHOLD
+          <div className={`rounded-xl p-5 border ${currentVibration > vibAlarm
             ? 'bg-red-500/20 border-red-500/50'
-            : 'bg-gradient-to-br from-blue-500/10 to-purple-500/10 border-blue-500/20'}`}>
+            : currentVibration > vibWarn
+              ? 'bg-[#FFB84E]/10 border-[#FFB84E]/20'
+              : 'bg-gradient-to-br from-blue-500/10 to-purple-500/10 border-blue-500/20'}`}>
             <div className="flex items-center space-x-2 mb-3">
-              <Waves className={`w-5 h-5 ${currentVibration > VIB_THRESHOLD ? 'text-red-400' : 'text-blue-400'}`} />
+              <Waves className={`w-5 h-5 ${currentVibration > vibAlarm ? 'text-red-400' : currentVibration > vibWarn ? 'text-[#FFB84E]' : 'text-blue-400'}`} />
               <p className="text-gray-300 text-xs font-medium">VIBRATION RMS</p>
-              {currentVibration > VIB_THRESHOLD && <span className="text-red-400 text-xs animate-pulse">!</span>}
+              {currentVibration > vibWarn && <span className="text-red-400 text-xs animate-pulse">!</span>}
             </div>
-            <p className={`text-4xl font-bold ${currentVibration > VIB_THRESHOLD ? 'text-red-400' : 'text-white'}`}>
+            <p className={`text-4xl font-bold ${currentVibration > vibAlarm ? 'text-red-400' : currentVibration > vibWarn ? 'text-[#FFB84E]' : 'text-white'}`}>
               {currentVibration.toFixed(2)}
             </p>
             <p className="text-blue-300 text-sm mt-1">mm/s</p>
