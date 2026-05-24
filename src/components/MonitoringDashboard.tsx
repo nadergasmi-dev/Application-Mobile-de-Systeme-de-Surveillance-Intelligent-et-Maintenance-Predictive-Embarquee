@@ -315,9 +315,9 @@ export default function MonitoringDashboard() {
   }[chartView];
 
   const chartSubtitle = {
-    second: `raw · last 60 s — ${secondData.length} pts`,
-    minute: `avg temp · RMS vib/min · last 60 min — ${minuteData.length} pts`,
-    hour:   `avg temp · RMS vib/hour · last 24 h — ${hourData.length} pts`,
+    second: `Last 60 seconds `,
+    minute: `Last 60 minutes`,
+    hour:   `Last 24 hours`,
   }[chartView];
 
   const handleLogout = () => {
@@ -526,7 +526,7 @@ export default function MonitoringDashboard() {
             }`}>
               {currentTemp.toFixed(1)}
             </p>
-            <p className="text-orange-300 text-sm mt-1">°C · avg 5 min</p>
+            <p className="text-orange-300 text-sm mt-1">°C </p>
           </div>
 
           <div className={`rounded-xl p-5 border ${
@@ -552,7 +552,7 @@ export default function MonitoringDashboard() {
             }`}>
               {currentVibration.toFixed(2)}
             </p>
-            <p className="text-blue-300 text-sm mt-1">mm/s · RMS 5 min</p>
+            <p className="text-blue-300 text-sm mt-1">mm/s </p>
           </div>
         </div>
 
