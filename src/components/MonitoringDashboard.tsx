@@ -140,14 +140,22 @@ export default function MonitoringDashboard() {
   const [lastUpdate, setLastUpdate]   = useState('');
   const [chartView, setChartView]     = useState<ChartView>('second');
 
-  const lastTempNotif = useRef<number>(0);
-  const lastVibNotif  = useRef<number>(0);
-  const lastFailNotif = useRef<number>(0);
-  const notifId       = useRef<number>(1);
-  const COOLDOWN      = 60000;
+  // ─── Cooldowns séparés par capteur ET par sévérité ──────
+  const lastTempWarnNotif  = useRef<number>(0);
+  const lastTempAlarmNotif = useRef<number>(0);
+  const lastVibWarnNotif   = useRef<number>(0);
+  const lastVibAlarmNotif  = useRef<number>(0);
+  const lastFailNotif      = useRef<number>(0);
+  const notifId            = useRef<number>(1);
+  const COOLDOWN_WARN  = 300_000;   // 5 min  — avertissement
+  const COOLDOWN_ALARM = 120_000;   // 2 min  — critique
 
-  const prevAiTemp = useRef<number | null>(null);
-  const prevAiVib  = useRef<number | null>(null);
+  const prevAiTemp         = useRef<number | null>(null);
+  const prevAiVib          = useRef<number | null>(null);
+  // Refs pour accès dans les callbacks Realtime (évite stale closures)
+  const lastPredictionRef     = useRef<number>(0);
+  const motorConfigRef        = useRef<MotorConfig | null>(null);
+  const checkThresholdsRef    = useRef<(t: number, v: number, f: number) => void>(() => {});
 
   const failureDetected = prediction?.failure === 1;
 
@@ -166,46 +174,196 @@ export default function MonitoringDashboard() {
   };
   const health = getHealthStatus();
 
+  // ─── Sync refs (évite stale closures dans Realtime callbacks) ─
+  useEffect(() => {
+    checkThresholdsRef.current = checkThresholds;
+  });
+  useEffect(() => {
+    lastPredictionRef.current = prediction?.failure ?? 0;
+  }, [prediction]);
+  useEffect(() => {
+    motorConfigRef.current = motorConfig;
+  }, [motorConfig]);
+
+  // ─── Setup notifications + canaux Android ────────────────
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
+
+    // Canaux Android (obligatoire Android 8+)
+    LocalNotifications.createChannel({
+      id:          'motor_critical',
+      name:        'Critical Alarms',
+      description: 'Temperature alarm, vibration alarm, AI failure prediction',
+      importance:  5,        // IMPORTANCE_HIGH → bannière heads-up
+      sound:       'default',
+      vibration:   true,
+      lights:      true,
+      lightColor:  '#FF0000',
+    }).catch(console.error);
+
+    LocalNotifications.createChannel({
+      id:          'motor_alerts',
+      name:        'Warning Alerts',
+      description: 'Early-warning alerts for temperature and vibration',
+      importance:  4,        // IMPORTANCE_DEFAULT
+      sound:       'default',
+      vibration:   true,
+      lights:      true,
+      lightColor:  '#FFB84E',
+    }).catch(console.error);
+
     LocalNotifications.requestPermissions().catch(console.error);
   }, []);
 
-  const sendNotification = async (title: string, body: string) => {
+  // ─── Supabase Realtime — sensor_data + ai_models ──────────
+  // Remplace le polling FCM : fonctionne en foreground ET en arrière-plan
+  useEffect(() => {
+    // Canal sensor_data : INSERT → recalcule live + vérifie seuils
+    const sensorChannel = supabase
+      .channel('realtime:sensor_data')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'sensor_data' },
+        (payload) => {
+          const row = payload.new as { temperature: number; rms: number };
+          if (!row) return;
+
+          const temp = parseFloat((row.temperature ?? 0).toFixed(2));
+          const vib  = parseFloat((row.rms         ?? 0).toFixed(3));
+
+          setCurrentTemp(prev => {
+            checkThresholdsRef.current(temp, vib, lastPredictionRef.current);
+            return temp;
+          });
+          setCurrentVibration(vib);
+
+          // Mettre à jour ai_inputs si changé
+          const tChanged = prevAiTemp.current === null || prevAiTemp.current !== temp;
+          const vChanged = prevAiVib.current  === null || prevAiVib.current  !== vib;
+          if (tChanged || vChanged) {
+            prevAiTemp.current = temp;
+            prevAiVib.current  = vib;
+            supabase.from('ai_inputs').insert({ temp, vib }).then(({ error }) => {
+              if (error) console.error('ai_inputs insert error:', error);
+            });
+          }
+
+          // Rafraîchir les graphiques
+          fetchSensorData();
+        }
+      )
+      .subscribe();
+
+    // Canal ai_models : INSERT → met à jour la prédiction
+    const aiChannel = supabase
+      .channel('realtime:ai_models')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'ai_models' },
+        (payload) => {
+          const ai = payload.new as AiPrediction;
+          if (!ai) return;
+          setPrediction(ai);
+          lastPredictionRef.current = ai.failure;
+          const d = new Date(ai.created_at);
+          setLastUpdate(`${pad(d.getHours())}:${pad(d.getMinutes())}`);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(sensorChannel);
+      supabase.removeChannel(aiChannel);
+    };
+  }, []);
+
+  // ─── Send a local notification (Android only) ───────────
+  const sendNotification = async (title: string, body: string, channelId = 'motor_alerts') => {
     if (!Capacitor.isNativePlatform()) return;
     try {
       await LocalNotifications.schedule({
-        notifications: [{ title, body, id: notifId.current++,
-          schedule: { at: new Date(Date.now() + 100) },
-          sound: 'default', actionTypeId: '', extra: null }]
+        notifications: [{
+          title,
+          body,
+          id:           notifId.current++,
+          schedule:     { at: new Date(Date.now() + 150) },
+          sound:        'default',
+          channelId,
+          actionTypeId: '',
+          extra:        null,
+        }],
       });
-    } catch {}
+    } catch (err) {
+      console.error('Local notification error:', err);
+    }
   };
 
+  // ─── Threshold checks — sévérité WARN / ALARM indépendants ─
   const checkThresholds = (temp: number, vib: number, failure: number) => {
-    const now = Date.now();
-    const tempThreshold = temp > tempAlarm ? tempAlarm : tempWarn;
-    const vibThreshold  = vib  > vibAlarm  ? vibAlarm  : vibWarn;
+    const now     = Date.now();
+    // Toujours lire depuis le ref → jamais de stale closure même en Realtime
+    const cfg     = motorConfigRef.current;
+    const th      = getThresholds(cfg?.motor_type);
+    const machine = MACHINE_TYPE_LABELS[cfg?.motor_type ?? ''] ?? 'Equipment';
 
-    if (temp > tempWarn && now - lastTempNotif.current > COOLDOWN) {
-      lastTempNotif.current = now;
+    const tempWarnL  = th.temperature.warn;
+    const tempAlarmL = th.temperature.alarm;
+    const vibWarnL   = th.vibration.warn;
+    const vibAlarmL  = th.vibration.alarm;
+
+    // ── Temperature : ALARM (prioritaire, cooldown court) ────
+    if (temp >= tempAlarmL && now - lastTempAlarmNotif.current > COOLDOWN_ALARM) {
+      lastTempAlarmNotif.current = now;
       sendNotification(
-        'Temperature Alert',
-        `Temperature ${temp.toFixed(1)} °C exceeds the ${tempThreshold} °C threshold. Immediate inspection recommended.`
+        '🔴 CRITICAL ALARM — High Temperature',
+        `[${machine}] Temperature: ${temp.toFixed(1)} °C — Alarm threshold: ${tempAlarmL} °C\n` +
+        `The equipment is operating above the critical limit. ` +
+        `Initiate an emergency shutdown and perform an immediate thermal inspection to prevent irreversible damage.`,
+        'motor_critical'
+      );
+    // ── Temperature : WARNING (indépendant de l'alarme) ──────
+    } else if (temp >= tempWarnL && temp < tempAlarmL && now - lastTempWarnNotif.current > COOLDOWN_WARN) {
+      lastTempWarnNotif.current = now;
+      sendNotification(
+        '⚠️ WARNING — Elevated Temperature',
+        `[${machine}] Temperature: ${temp.toFixed(1)} °C — Warning threshold: ${tempWarnL} °C\n` +
+        `Temperature is approaching the critical alarm limit. ` +
+        `Reduce operational load, verify cooling system performance, and monitor continuously.`,
+        'motor_alerts'
       );
     }
-    if (vib > vibWarn && now - lastVibNotif.current > COOLDOWN) {
-      lastVibNotif.current = now;
+
+    // ── Vibration RMS : ALARM ────────────────────────────────
+    if (vib >= vibAlarmL && now - lastVibAlarmNotif.current > COOLDOWN_ALARM) {
+      lastVibAlarmNotif.current = now;
       sendNotification(
-        'Vibration Alert',
-        `Vibration level ${vib.toFixed(2)} mm/s exceeds the ${vibThreshold} mm/s threshold. Please verify machine balance.`
+        '🔴 CRITICAL ALARM — Excessive Vibration',
+        `[${machine}] Vibration: ${vib.toFixed(2)} mm/s — Alarm threshold: ${vibAlarmL} mm/s\n` +
+        `Vibration level is critically high. Stop the machine immediately and inspect for ` +
+        `mechanical imbalance, bearing failure, or coupling misalignment.`,
+        'motor_critical'
+      );
+    // ── Vibration RMS : WARNING ──────────────────────────────
+    } else if (vib >= vibWarnL && vib < vibAlarmL && now - lastVibWarnNotif.current > COOLDOWN_WARN) {
+      lastVibWarnNotif.current = now;
+      sendNotification(
+        '⚠️ WARNING — High Vibration Level',
+        `[${machine}] Vibration: ${vib.toFixed(2)} mm/s — Warning threshold: ${vibWarnL} mm/s\n` +
+        `Vibration level is above the acceptable limit. ` +
+        `Inspect mountings, couplings, and rotational balance. Schedule preventive maintenance if condition persists.`,
+        'motor_alerts'
       );
     }
-    if (failure === 1 && now - lastFailNotif.current > COOLDOWN) {
+
+    // ── AI Failure Prediction ────────────────────────────────
+    if (failure === 1 && now - lastFailNotif.current > COOLDOWN_ALARM) {
       lastFailNotif.current = now;
       sendNotification(
-        'Failure Risk Detected',
-        'A potential failure has been identified within the next 24 hours. Schedule an inspection immediately.'
+        '🚨 AI ALERT — Failure Risk Detected',
+        `[${machine}] Predictive diagnostic model has identified a high probability of equipment failure ` +
+        `within the next 24 hours.\n` +
+        `Recommended action: halt non-critical operations and schedule a targeted maintenance inspection immediately.`,
+        'motor_critical'
       );
     }
   };
@@ -320,9 +478,11 @@ export default function MonitoringDashboard() {
     await Promise.all([fetchSensorData(), fetchPredictions()]);
   };
 
+  // Chargement initial + rafraîchissement graphiques toutes les 30s
+  // (les données live arrivent via Supabase Realtime, pas besoin de 5s)
   useEffect(() => {
     fetchAll();
-    const interval = setInterval(fetchAll, 5000);
+    const interval = setInterval(fetchAll, 30000);
     return () => clearInterval(interval);
   }, []);
 
