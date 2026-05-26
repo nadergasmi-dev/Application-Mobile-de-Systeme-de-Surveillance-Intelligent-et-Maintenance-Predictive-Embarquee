@@ -146,6 +146,9 @@ export default function MonitoringDashboard() {
   const notifId       = useRef<number>(1);
   const COOLDOWN      = 60000;
 
+  const prevAiTemp = useRef<number | null>(null);
+  const prevAiVib  = useRef<number | null>(null);
+
   const failureDetected = prediction?.failure === 1;
 
   const thresholds = getThresholds(motorConfig?.motor_type);
@@ -261,6 +264,21 @@ export default function MonitoringDashboard() {
         setCurrentVibration(rmsVib);
         // Re-check thresholds with updated live values (failure from prediction)
         checkThresholds(avgTemp, rmsVib, prediction?.failure ?? 0);
+
+        // ── Envoyer à ai_inputs si temp ou vib a changé ──────────
+        const tempChanged = prevAiTemp.current === null || prevAiTemp.current !== avgTemp;
+        const vibChanged  = prevAiVib.current  === null || prevAiVib.current  !== rmsVib;
+
+        if (tempChanged || vibChanged) {
+          prevAiTemp.current = avgTemp;
+          prevAiVib.current  = rmsVib;
+
+          const { error } = await supabase
+            .from('ai_inputs')
+            .insert({ temp: avgTemp, vib: rmsVib });
+
+          if (error) console.error('ai_inputs insert error:', error);
+        }
       }
 
     } catch (err) {
