@@ -231,7 +231,7 @@ export default function MonitoringDashboard() {
       const { data: hr } = await supabase.from('sensor_data').select('id, created_at, temperature, rms').gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()).order('created_at', { ascending: false }).limit(50000);
       if (hr) setHourData(buildAveragedPoints([...(hr as RawSensor[])].reverse(), d => `${pad(d.getHours())}:00`));
 
-      const { data: live5 } = await supabase.from('sensor_data').select('temperature, rms').gte('created_at', new Date(Date.now() - 5 * 60 * 1000).toISOString()).order('created_at', { ascending: true });
+      const { data: live5 } = await supabase.from('sensor_data').select('temperature, rms').gte('created_at', new Date(Date.now() - 60 * 1000).toISOString()).order('created_at', { ascending: true });
       if (live5 && live5.length > 0) {
         const { avgTemp, rmsVib } = computeLive5Min(live5 as RawSensor[]);
         setCurrentTemp(avgTemp); setCurrentVibration(rmsVib);
